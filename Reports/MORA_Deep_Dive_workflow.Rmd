@@ -5048,7 +5048,13 @@ use_per_visitor <- vis_clim_use %>%
                    max_observed_use = max(observed_use, na.rm = TRUE),
                    min_use = min(use_per_visitor, na.rm = TRUE),
                    mean_use = mean(use_per_visitor, na.rm = TRUE),
-                   max_use = max(use_per_visitor, na.rm = TRUE))
+                   max_use = max(use_per_visitor, na.rm = TRUE),
+                   # Effective rate used for demand: total use / total visitors
+                   # over the period (ratio of totals), not the mean of the
+                   # monthly ratios above, so high-visitation months carry
+                   # proportionally more weight.
+                   effective_use = sum(observed_use, na.rm = TRUE) /
+                     sum(visitors_mid, na.rm = TRUE))
 
 print(use_per_visitor)
 
@@ -5147,8 +5153,8 @@ gc()
 # record (use_per_visitor summary table, built above in the use_per_visitor
 # chunk) rather than fixed constants: low = pre-leak period mean use/visitor,
 # high = post-leak period mean use/visitor, mid = midpoint between the two.
-low_use_per_visitor  <- use_per_visitor$mean_use[use_per_visitor$period == "Pre-June 2019 (Baseline)"]
-high_use_per_visitor <- use_per_visitor$mean_use[use_per_visitor$period == "Post-June 2019 (Post-Leak)"]
+low_use_per_visitor  <- use_per_visitor$effective_use[use_per_visitor$period == "Pre-June 2019 (Baseline)"]
+high_use_per_visitor <- use_per_visitor$effective_use[use_per_visitor$period == "Post-June 2019 (Post-Leak)"]
 mid_use_per_visitor  <- mean(c(low_use_per_visitor, high_use_per_visitor))
 
 monthly_use <- vis_clim_use %>%
@@ -6843,7 +6849,7 @@ plot_dat_climate <- wbm_annual %>%
 
 wb_fig <- ggplot(plot_dat_climate) + 
   # Add shaded region between 2035 and 2064
-  geom_rect(aes(xmin = fut_yrs[1], xmax = fut_yrs[2], ymin = -Inf, ymax = Inf),
+  geom_rect(aes(xmin = fut_yrs[1], xmax = fut_yrs[2] + 1, ymin = -Inf, ymax = Inf),
             fill = "grey85", linewidth = 0,  alpha = .1) + 
   geom_line(aes(x = year, y = vals, color = CF), lwd = 0.5) +
   geom_line(aes(x = year, y = roll_vals, group = CF), 
@@ -6898,7 +6904,7 @@ plot_dat_runoff <- wbm_annual %>%
   dplyr::mutate(CF = factor(CF, levels = c("Historical", "Less Snowy Dry", "Snowy Wet")))
 
 wb_fig_runoff_gal <- ggplot(plot_dat_runoff) +
-  geom_rect(aes(xmin = fut_yrs[1], xmax = fut_yrs[2], ymin = -Inf, ymax = Inf),
+  geom_rect(aes(xmin = fut_yrs[1], xmax = fut_yrs[2] + 1, ymin = -Inf, ymax = Inf),
             fill = "grey85", linewidth = 0, alpha = .1) +
   geom_line(aes(x = year, y = vals, color = CF), lwd = 0.5) +
   geom_line(aes(x = year, y = roll_vals, group = CF),
@@ -6978,7 +6984,7 @@ pdat <- annual_visitation %>%
 
 vis_fig_2 <- ggplot(pdat, aes(x = year)) +
   # Shaded mid-century box
-  annotate("rect", xmin = fut_yrs[1], xmax = fut_yrs[2], ymin = -Inf, ymax = Inf, 
+  annotate("rect", xmin = fut_yrs[1], xmax = fut_yrs[2] + 1, ymin = -Inf, ymax = Inf, 
            fill = "lightgrey", alpha = 0.3) + 
   
   # Uncertainty Ribbon (collapses to zero-width for the observed years,
@@ -7095,7 +7101,7 @@ p_dat2 <- annual_use %>%
   dplyr::mutate(c_group = dplyr::if_else(group == "Historical", "Historical", "Projected"))
 
 use_fig[[2]] <- ggplot(p_dat2, aes(x = year)) +
-  geom_rect(aes(xmin = fut_yrs[1], xmax = fut_yrs[2], ymin = -Inf, ymax = Inf),
+  geom_rect(aes(xmin = fut_yrs[1], xmax = fut_yrs[2] + 1, ymin = -Inf, ymax = Inf),
             fill = "lightgrey", alpha = 0.3, inherit.aes = FALSE) +
   geom_ribbon(aes(ymin = low_use_sum, ymax = high_use_sum, fill = c_group),
               alpha = 0.4, lwd = 0) +
@@ -7644,7 +7650,7 @@ print(snowmelt_stats)
 # Snowmelt Fraction Figure
 sm_fraction_fig <- ggplot(pdat) +
   # Add shaded region between 2035 and 2064
-  geom_rect(aes(xmin = fut_yrs[1], xmax = fut_yrs[2], ymin = -Inf, ymax = Inf), 
+  geom_rect(aes(xmin = fut_yrs[1], xmax = fut_yrs[2] + 1, ymin = -Inf, ymax = Inf), 
             fill = "lightgrey", alpha = 0.1) + 
   # FIX: "type" is not a real ggplot aesthetic (silently dropped), so this
   # background line had no group aesthetic and connected all three CF
@@ -8082,6 +8088,10 @@ precip_paradise_full <- snotel_hourly %>%
 # a data quality issue, setting an arbitrary limit to filter those out
 implausible_increment_in <- 5
 
+# Typical sampling interval = median gap between consecutive readings;
+# readings after a gap > 1.5x this are dropped (increment spans missing data).
+typical_gap_hrs <- median(precip_paradise_full$gap_hrs, na.rm = TRUE)
+
 summer_hourly_precip <- precip_paradise_full %>%
   dplyr::mutate(value = dplyr::if_else(is.na(raw_increment) |
                                        raw_increment < 0 |
@@ -8146,6 +8156,7 @@ precip_paradise_daily_full %>%
 
 # Use 10 as a cutoff (there aren't any days over 10 so doesn't matter much here)
 implausible_daily_in <- 10
+typical_gap_days <- median(precip_paradise_daily_full$gap_days, na.rm = TRUE)
 
 # Rain only - restrict to Jun-Sep (again this is quick and dirty so likely some snow in this record)
 rain_months <- 6:9
