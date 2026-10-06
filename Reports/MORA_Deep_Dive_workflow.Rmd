@@ -17,8 +17,13 @@ knitr::opts_chunk$set(echo = TRUE,
                       warning = FALSE, 
                       eval = TRUE)
 
+# This Rmd lives in Reports/, but all paths (data/, src/, setup.R) are relative
+# to the project root. root.dir applies from the next chunk on; chdir = TRUE
+# lets setup.R find src/ while this chunk still runs from Reports/.
+knitr::opts_knit$set(root.dir = here::here())
+
 # Load functions after park files in case functions were updated since last save.
-source('setup.R')
+source(here::here("setup.R"), chdir = TRUE)
 library(rnoaa)
 
 # Set mapview basemap options
@@ -122,8 +127,11 @@ gal_to_cf <- 0.133681
 cf_to_gal <- 1/gal_to_cf
 
 # Define time periods
-hist_yrs <- c(1979, 2012)
-fut_yrs <- c(2035, 2065)
+# BOTH ends of each window are INCLUSIVE: historical baseline = 1980-2012
+# (1979 is the WBM spin-up year and is excluded); future = 2035-2064 (ends just
+# before 2065-01-01). Always filter with year >= x[1] & year <= x[2].
+hist_yrs <- c(1980, 2012)
+fut_yrs <- c(2035, 2064)
 
 # Pick CRS for project
 crs_use <- "EPSG:5070"
@@ -2822,8 +2830,8 @@ within.
 wbm_xy_stats <- wbm_all %>%
   dplyr::mutate(
     year       = year(date),
-    stat_period = ifelse(year < 2013, "Baseline",
-                  ifelse(year > 2034 & year < 2065, "Future", "Other"))
+    stat_period = ifelse(year >= hist_yrs[1] & year <= hist_yrs[2], "Baseline",
+                  ifelse(year >= fut_yrs[1] & year <= fut_yrs[2], "Future", "Other"))
   ) %>%
   dplyr::filter(stat_period != "Other") %>%
   dplyr::select(GCM, stat_period, x, y, Skill, precip_in_wbm, tmean_C, runoff_in_wbm, pet_in_wbm) %>%
@@ -3078,8 +3086,8 @@ all_clim_stats <- wbm_all %>%
   data.table() %>%
   dplyr::mutate(year = year(date),
                 stat_period = 
-                  ifelse(year < 2013 & year > 1979, "Baseline",
-                      ifelse(year > 2034 & year < 2065, "Future", "Other"))) %>%
+                  ifelse(year >= hist_yrs[1] & year <= hist_yrs[2], "Baseline",
+                      ifelse(year >= fut_yrs[1] & year <= fut_yrs[2], "Future", "Other"))) %>%
   dplyr::filter(!stat_period == "Other",
                 stat_period != "Baseline" | GCM == "GridMET") %>%
   dplyr::select(GCM, stat_period, Skill, precip_in_wbm, tmean_C, runoff_in_wbm, pet_in_wbm, aet_in_wbm, snow_in_wbm) %>%
@@ -3744,7 +3752,7 @@ site_fig_point <- current_system %>%
   dplyr::select(label)
 
 # Workspace cleanup: these are no longer used after this point.
-rm(aoi_gridmet_basin, basin, basin_area, basin_wbm, cal_dat, clim_basin, clim_pts_basin, combined_wide,  hydro_colors, hydro_lines, mod_dat, model, p, routing, scale_factor, usgs_discharge_bf, vic_dat)
+rm(aoi_gridmet_basin, basin_area, basin_wbm, cal_dat, clim_basin, clim_pts_basin, combined_wide,  hydro_colors, hydro_lines, mod_dat, model, p, routing, scale_factor, usgs_discharge_bf, vic_dat)
 gc()
 ```
 
@@ -3861,8 +3869,8 @@ ggplot(wbm %>% dplyr::filter(year(date) %in% c(2025, 2026),
 # columns to appear alongside each one.
 hydro_grid_dat <- wbm %>%
   dplyr::mutate(doy = yday(date), year = year(date)) %>%
-  dplyr::filter(year >= hist_yrs[1] & year < hist_yrs[2] |
-                year >= fut_yrs[1]  & year < fut_yrs[2]) %>%
+  dplyr::filter(year >= hist_yrs[1] & year <= hist_yrs[2] |
+                year >= fut_yrs[1]  & year <= fut_yrs[2]) %>%
   dplyr::select(doy, year, CF, GCM,
                 `Edith Current`    = mean_edith_discharge,
                 `Edith Downstream` = mean_down_edith_discharge,
@@ -3974,7 +3982,7 @@ wbm_monthly <- wbm %>%
 
 # Percentage Changes
 wbm_stats <- wbm_annual %>%
-  dplyr::filter(year < 2013 | (year > 2034 & year < 2065)) %>%
+  dplyr::filter((year >= hist_yrs[1] & year <= hist_yrs[2]) | (year >= fut_yrs[1] & year <= fut_yrs[2])) %>%
   dplyr::group_by(CF) %>%
   dplyr::summarize(tmean_F = mean(tmean_F),
                    precip_in = mean(precip_in_wbm),
@@ -4275,12 +4283,12 @@ that method for monthly and annual projections
 
 monthly_visitation <- gam_res$monthly %>%
   dplyr::mutate(group = case_when(year(ym) < 2026 ~ "Historical",
-                                  year(ym) >= 2035 & year(ym) <2065 ~ "Projected",
+                                  year(ym) >= fut_yrs[1] & year(ym) <= fut_yrs[2] ~ "Projected",
                                   TRUE ~ "Other"))
 
 annual_visitation <- gam_res$annual %>%
   mutate(group = case_when(year < 2026 ~ "Historical",
-                           year >= 2035 & year < 2065 ~ "Projected",
+                           year >= fut_yrs[1] & year <= fut_yrs[2] ~ "Projected",
                            TRUE ~ "Other"))
 
 monthly_visitor_proportions <- calc_monthly_proportions(df = monthly_visitation %>%
@@ -4816,8 +4824,8 @@ turbidity record has a gap exactly over that event; see above), but one we
 can evaluate using the water balance model's daily precipitation record,
 which spans both the historical baseline and the mid-century projection
 period. Here we compare the frequency of 2-day rain totals at or above that
-8-inch benchmark between the historical baseline (1979-2012) and the
-projection period (2035-2065), under both climate futures.
+8-inch benchmark between the historical baseline (1980-2012) and the
+projection period (2035-2064), under both climate futures.
 
 ```{r intense_precip_frequency}
 
@@ -4826,8 +4834,8 @@ projection period (2035-2065), under both climate futures.
 intense_precip_dat <- wbm %>%
   dplyr::mutate(year = lubridate::year(date)) %>%
   dplyr::filter(
-    (CF == "Historical" & year >= hist_yrs[1] & year < hist_yrs[2]) |
-    (CF %in% c("Less Snowy Dry", "Snowy Wet") & year >= fut_yrs[1] & year < fut_yrs[2])
+    (CF == "Historical" & year >= hist_yrs[1] & year <= hist_yrs[2]) |
+    (CF %in% c("Less Snowy Dry", "Snowy Wet") & year >= fut_yrs[1] & year <= fut_yrs[2])
   ) %>%
   dplyr::arrange(GCM, date) %>%
   dplyr::group_by(GCM, CF) %>%
@@ -5149,7 +5157,7 @@ monthly_use <- vis_clim_use %>%
                 low_use = visitors_mid * low_use_per_visitor) %>%
   select(ym, visitors_mid, mid_use, low_use, high_use, observed_use) %>%
   dplyr::mutate(group = case_when(year(ym) < 2026 ~ "Historical",
-                                  year(ym) >= 2035 & year(ym) <2065 ~ "Projected",
+                                  year(ym) >= fut_yrs[1] & year(ym) <= fut_yrs[2] ~ "Projected",
                                   TRUE ~ "Other"))
   
 
@@ -5166,7 +5174,7 @@ annual_use <- monthly_use %>%
   dplyr::group_by(year) %>%
   dplyr::summarize_all(.funs = list(sum = sum)) %>%
   dplyr::mutate(group = case_when(year < 2026 ~ "Historical",
-                                  year >= 2035 & year <2065 ~ "Projected",
+                                  year >= fut_yrs[1] & year <= fut_yrs[2] ~ "Projected",
                                   TRUE ~ "Other"))
 
 
@@ -5234,7 +5242,7 @@ separately for pre- and post-2019 leak conditions (`monthly_leak_summary`,
 above), rather than the per-visitor estimate, since real meter readings
 exist for that period. For the future, we use the GAM-based visitation
 projection converted to gallons via the use-per-visitor rates
-(`monthly_use`, above), averaged by month across the 2035-2065 mid-century
+(`monthly_use`, above), averaged by month across the 2035-2064 mid-century
 window. Supply is the monthly WBM runoff total for each system, averaged by
 month within the matching window, for the historical GCM and for each of
 the two focal climate futures (Snowy Wet, Less Snowy Dry).
@@ -5256,17 +5264,17 @@ demand_hist_monthly <- monthly_leak_summary %>%
     demand_gal_high = max_use)
 
 # Future: GAM-projected visitation x use-per-visitor rates (mid/low/high),
-# averaged by calendar month across the 2035-2065 mid-century window.
+# averaged by calendar month across the 2035-2064 mid-century window.
 demand_fut_monthly <- monthly_use %>%
   dplyr::mutate(year = year(ym), month = month(ym)) %>%
-  dplyr::filter(year >= fut_yrs[1], year < fut_yrs[2]) %>%
+  dplyr::filter(year >= fut_yrs[1], year <= fut_yrs[2]) %>%
   dplyr::group_by(month) %>%
   dplyr::summarize(
     demand_gal_mid  = mean(mid_use,  na.rm = TRUE),
     demand_gal_low  = mean(low_use,  na.rm = TRUE),
     demand_gal_high = mean(high_use, na.rm = TRUE),
     .groups = "drop") %>%
-  dplyr::mutate(scenario = "Projected (2035-2065)")
+  dplyr::mutate(scenario = "Projected (2035-2064)")
 
 demand_monthly <- dplyr::bind_rows(demand_hist_monthly, demand_fut_monthly)
 
@@ -5277,8 +5285,8 @@ demand_monthly <- dplyr::bind_rows(demand_hist_monthly, demand_fut_monthly)
 # CFs use fut_yrs (same windows used throughout the rest of the report).
 supply_monthly <- wbm_monthly %>%
   dplyr::mutate(year = year(ym), month = month(ym)) %>%
-  dplyr::filter((CF == "Historical" & year >= hist_yrs[1] & year < hist_yrs[2]) |
-                (CF != "Historical" & year >= fut_yrs[1]  & year < fut_yrs[2])) %>%
+  dplyr::filter((CF == "Historical" & year >= hist_yrs[1] & year <= hist_yrs[2]) |
+                (CF != "Historical" & year >= fut_yrs[1]  & year <= fut_yrs[2])) %>%
   dplyr::group_by(CF, month) %>%
   dplyr::summarize(
     `Edith Current`    = mean(runoff_gal_edith_wbm,      na.rm = TRUE),
@@ -5295,8 +5303,8 @@ scenario_cf_lookup <- tibble::tribble(
   ~scenario,                 ~CF,
   "Pre-Leak (Historical)",   "Historical",
   "Post-Leak (Historical)",  "Historical",
-  "Projected (2035-2065)",   "Snowy Wet",
-  "Projected (2035-2065)",   "Less Snowy Dry"
+  "Projected (2035-2064)",   "Snowy Wet",
+  "Projected (2035-2064)",   "Less Snowy Dry"
 )
 
 # --- 4. Monthly D:S / S:D, per system, per scenario -------------------------
@@ -5455,7 +5463,7 @@ tank_storage <- tank_demand_monthly %>%
 tank_colors <- c(
   "Pre-Leak (Historical)"   = unname(plot_colors["Snowy Wet"]),
   "Post-Leak (Historical)"  = "black",
-  "Projected (2035-2065)"   = unname(plot_colors["Less Snowy Dry"])
+  "Projected (2035-2064)"   = unname(plot_colors["Less Snowy Dry"])
 )
 
 tank_storage_fig <- ggplot(tank_storage, aes(x = month_label, group = scenario, color = scenario, fill = scenario)) +
@@ -5918,8 +5926,8 @@ calc_spei_cf <- function(cf_name, scale = ag_n) {
                    frequency = freq),
                 scale = scale,
                 # Reference (fitting) period = the project's historical period
-                # (hist_yrs = 1979-2012), same baseline the other analyses use,
-                # so SPEI = 0 means "typical of 1979-2012" and every later year
+                # (hist_yrs = 1980-2012), same baseline the other analyses use,
+                # so SPEI = 0 means "typical of 1980-2012" and every later year
                 # (2013-2026 observed + projected) is scored against it.
                 ref.start = c(hist_yrs[1], 1),
                 ref.end = c(hist_yrs[2], 12))
@@ -5967,7 +5975,7 @@ agg_wbm %>%
 
 # (c) Compare SPEI itself, split the same way, by climate future. `ref.end
 #     = c(hist_yrs[2], 12)` above fixes the distribution spei() standardizes
-#     against to the 1979-2012 historical period only -- so even a modest increase
+#     against to the 1980-2012 historical period only -- so even a modest increase
 #     in month-to-month variability in the single-GCM-driven future
 #     balance (vs. the smoothed historical GridMET record) will show up as
 #     mechanically more extreme SPEI, independent of any true change in
@@ -5986,11 +5994,11 @@ spei_results %>%
 thresholds <- c(moderate = -1, severe = -1.5, extreme = -2)
 
 # Analysis windows match the other analyses (e.g. the snowmelt figures):
-# Historical = hist_yrs (1979-2012), projected = fut_yrs (2035-2064). SPEI itself
+# Historical = hist_yrs (1980-2012), projected = fut_yrs (2035-2064). SPEI itself
 # is computed on the continuous monthly series above; only the summary
 # statistics below are restricted to these windows.
 spei_events <- spei_results %>%
-  filter(year <= hist_yrs[2] | year >= fut_yrs[1], year < fut_yrs[2]) %>%
+  filter((year >= hist_yrs[1] & year <= hist_yrs[2]) | (year >= fut_yrs[1] & year <= fut_yrs[2])) %>%
   drop_na(spei) %>%
   # Pivot thresholds to calculate all categories at once
   crossing(threshold_name = names(thresholds)) %>%
@@ -6021,7 +6029,7 @@ event_metrics <- spei_events %>%
 
 # Overall Severity Stats
 severity_metrics <- spei_results %>%
-  filter(year <= hist_yrs[2] | year >= fut_yrs[1], year < fut_yrs[2]) %>%
+  filter((year >= hist_yrs[1] & year <= hist_yrs[2]) | (year >= fut_yrs[1] & year <= fut_yrs[2])) %>%
   group_by(CF) %>%
   summarize(
     n = n(),
@@ -6049,7 +6057,7 @@ spei_metrics <- bind_rows(event_metrics, severity_metrics) %>%
 # than "X% of periods" -- e.g. "in a given year under Snowy Wet, there is
 # a Y% chance of at least one severe-drought period."
 n_years_by_cf <- spei_results %>%
-  filter(year <= hist_yrs[2] | year >= fut_yrs[1], year < fut_yrs[2]) %>%
+  filter((year >= hist_yrs[1] & year <= hist_yrs[2]) | (year >= fut_yrs[1] & year <= fut_yrs[2])) %>%
   distinct(CF, year) %>%
   count(CF, name = "n_years")
 
@@ -6076,7 +6084,7 @@ print(drought_probability_annual)
 # has ended within N periods -- what the "Alternative to consider later"
 # note above was proposing.
 drought_states <- spei_results %>%
-  filter(year <= hist_yrs[2] | year >= fut_yrs[1], year < fut_yrs[2]) %>%
+  filter((year >= hist_yrs[1] & year <= hist_yrs[2]) | (year >= fut_yrs[1] & year <= fut_yrs[2])) %>%
   drop_na(spei) %>%
   mutate(state = case_when(
     spei <= thresholds["extreme"]  ~ "Extreme",
@@ -6215,7 +6223,9 @@ wbm_snow_drought <- c("Less Snowy Dry", "Snowy Wet") %>%
         swe_col = "snowpack_in_wbm",
         precip_col = "precip_cum_in",
         group_col = NULL,
-        climatology_filter = dat$CF == "Historical"
+        climatology_filter = dat$CF == "Historical" &
+                             lubridate::year(dat$date) >= hist_yrs[1] &
+                             lubridate::year(dat$date) <= hist_yrs[2]
       ) %>%
       dplyr::left_join(dat %>% dplyr::distinct(date, CF), by = "date")
   }) %>%
@@ -6242,7 +6252,9 @@ ggplot(wbm_snow_drought %>% dplyr::filter(!is.na(drought_type)),
 # 4. Overall % of cool-season days by drought type - WBM climate futures
 # vs. observed SNOTEL, the direct comparison-with-observations view --------
 wbm_drought_pct <- wbm_snow_drought %>%
-  dplyr::filter(!is.na(drought_type)) %>%
+  dplyr::filter(!is.na(drought_type),
+                (CF == "Historical" & lubridate::year(date) >= hist_yrs[1] & lubridate::year(date) <= hist_yrs[2]) |
+                (CF != "Historical" & lubridate::year(date) >= fut_yrs[1] & lubridate::year(date) <= fut_yrs[2])) %>%
   dplyr::count(CF, drought_type) %>%
   dplyr::group_by(CF) %>%
   dplyr::mutate(pct_days = 100 * n / sum(n)) %>%
@@ -6287,11 +6299,11 @@ Look at cold days (min annual temp) for past and clim futures
 ```{r cold_days}
 
 cold_days <- clim_hist %>%
-  dplyr::filter(year(date) < 2012) %>%
+  dplyr::filter(year(date) >= hist_yrs[1] & year(date) <= hist_yrs[2]) %>%
   group_by(date, CF) %>%
   dplyr::summarize(tmin_C = min(tmin_C)) %>%
   bind_rows(clim_fut %>% 
-              dplyr::filter(year(date) > 2034 & year(date) < 2065) %>%
+              dplyr::filter(year(date) >= fut_yrs[1] & year(date) <= fut_yrs[2]) %>%
               left_join(selected_cfs, by = "GCM") %>%
               drop_na(CF) %>%
               group_by(date, CF) %>%
@@ -6334,8 +6346,8 @@ wbm_magnitude_vars <- c("precip_in_wbm", "rain_in_wbm", "snow_in_wbm",
 
 change <- wbm_annual %>%
   dplyr::ungroup() %>%
-  dplyr::filter((CF == "Historical" & year >= hist_yrs[1] & year < hist_yrs[2]) |
-                (CF != "Historical" & year >= fut_yrs[1]  & year < fut_yrs[2])) %>%
+  dplyr::filter((CF == "Historical" & year >= hist_yrs[1] & year <= hist_yrs[2]) |
+                (CF != "Historical" & year >= fut_yrs[1]  & year <= fut_yrs[2])) %>%
   dplyr::select(CF, dplyr::all_of(wbm_magnitude_vars)) %>%
   dplyr::group_by(CF) %>%
   dplyr::summarize(dplyr::across(dplyr::everything(), list(mean = mean, sd = sd), na.rm = TRUE),
@@ -6343,8 +6355,8 @@ change <- wbm_annual %>%
   tidyr::pivot_longer(-CF, names_to = "variable_stat", values_to = "value") %>%
   tidyr::pivot_wider(names_from = CF, values_from = value) %>%
   dplyr::mutate(
-    `% Change Drier`  = 100 * (`Less Snowy Dry` - Historical) / Historical,
-    `% Change Wetter` = 100 * (`Snowy Wet` - Historical) / Historical
+    `% Change Less Snowy Dry`  = 100 * (`Less Snowy Dry` - Historical) / Historical,
+    `% Change Snowy Wet` = 100 * (`Snowy Wet` - Historical) / Historical
   ) %>%
   dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~signif(.x, 3)))
 
@@ -6830,8 +6842,8 @@ plot_dat_climate <- wbm_annual %>%
   dplyr::mutate(CF = factor(CF, levels = c("Historical", "Less Snowy Dry", "Snowy Wet")))
 
 wb_fig <- ggplot(plot_dat_climate) + 
-  # Add shaded region between 2035 and 2065
-  geom_rect(aes(xmin = 2035, xmax = 2065, ymin = -Inf, ymax = Inf),
+  # Add shaded region between 2035 and 2064
+  geom_rect(aes(xmin = fut_yrs[1], xmax = fut_yrs[2], ymin = -Inf, ymax = Inf),
             fill = "grey85", linewidth = 0,  alpha = .1) + 
   geom_line(aes(x = year, y = vals, color = CF), lwd = 0.5) +
   geom_line(aes(x = year, y = roll_vals, group = CF), 
@@ -6886,7 +6898,7 @@ plot_dat_runoff <- wbm_annual %>%
   dplyr::mutate(CF = factor(CF, levels = c("Historical", "Less Snowy Dry", "Snowy Wet")))
 
 wb_fig_runoff_gal <- ggplot(plot_dat_runoff) +
-  geom_rect(aes(xmin = 2035, xmax = 2065, ymin = -Inf, ymax = Inf),
+  geom_rect(aes(xmin = fut_yrs[1], xmax = fut_yrs[2], ymin = -Inf, ymax = Inf),
             fill = "grey85", linewidth = 0, alpha = .1) +
   geom_line(aes(x = year, y = vals, color = CF), lwd = 0.5) +
   geom_line(aes(x = year, y = roll_vals, group = CF),
@@ -6913,7 +6925,7 @@ ggsave(wb_fig_runoff_gal, filename = "data/park/MORA/Figs/water_balance_runoff_g
 
 #### Visitation
 
-```{r vis_plot, fig.alt=c("Two-panel figure of Paradise visitation. Left: monthly visitor seasonality as a mean line with a shaded min/max ribbon, one line each for the historical and projected mid-century periods, showing the summer peak. Right: annual visitor trend from the observed record through 2100, with a shaded uncertainty ribbon and a shaded box marking the 2035-2065 mid-century window, in the same historical/projected colors.", "Scatter plot of annual visitors against mean annual temperature for the observed historical years, with a linear trend line, showing a positive relationship between warmer years and higher visitation.")}
+```{r vis_plot, fig.alt=c("Two-panel figure of Paradise visitation. Left: monthly visitor seasonality as a mean line with a shaded min/max ribbon, one line each for the historical and projected mid-century periods, showing the summer peak. Right: annual visitor trend from the observed record through 2100, with a shaded uncertainty ribbon and a shaded box marking the 2035-2064 mid-century window, in the same historical/projected colors.", "Scatter plot of annual visitors against mean annual temperature for the observed historical years, with a linear trend line, showing a positive relationship between warmer years and higher visitation.")}
 
 # plot visitation
 
@@ -6966,7 +6978,7 @@ pdat <- annual_visitation %>%
 
 vis_fig_2 <- ggplot(pdat, aes(x = year)) +
   # Shaded mid-century box
-  annotate("rect", xmin = 2035, xmax = 2065, ymin = -Inf, ymax = Inf, 
+  annotate("rect", xmin = fut_yrs[1], xmax = fut_yrs[2], ymin = -Inf, ymax = Inf, 
            fill = "lightgrey", alpha = 0.3) + 
   
   # Uncertainty Ribbon (collapses to zero-width for the observed years,
@@ -7036,7 +7048,7 @@ ggplot(clim_vis_dat, aes(x = tmean_F, y = visitors_mid)) +
 
 #### Water Use
 
-```{r water_use_fig, fig.alt=c("Two-panel figure of Paradise water use estimated from visitation. Left: monthly use as a mean line with a shaded min/max ribbon, one line each for the historical and projected mid-century periods. Right: annual total use over the observed-through-projected record, with a shaded uncertainty ribbon and a shaded box marking the 2035-2065 mid-century window, plus a text label giving the low/mid/high gallons-per-visitor rates used to derive the estimate.")}
+```{r water_use_fig, fig.alt=c("Two-panel figure of Paradise water use estimated from visitation. Left: monthly use as a mean line with a shaded min/max ribbon, one line each for the historical and projected mid-century periods. Right: annual total use over the observed-through-projected record, with a shaded uncertainty ribbon and a shaded box marking the 2035-2064 mid-century window, plus a text label giving the low/mid/high gallons-per-visitor rates used to derive the estimate.")}
 
 # FIX: this chunk previously referenced monthly_use_proportions$low_use_hist /
 # mid_use_fut / etc. and annual_use$low_use / c_group - none of which exist
@@ -7071,10 +7083,10 @@ use_fig[[1]] <- ggplot(p_dat, aes(x = month_date)) +
 
 # Extend the plotted record through FUTURE_END_YEAR (2099, matching
 # vis_fig_2's year < 2100 above) instead of the demand_summary table's
-# Historical/Projected(2035-2065)/Other split, which was silently dropping
+# Historical/Projected(2035-2064)/Other split, which was silently dropping
 # both the 2026-2034 gap and the 2066-2099 tail from this figure. annual_use
 # itself (and its "group" column) is left untouched, since demand_summary
-# below still needs that exact Historical vs. 2035-2065-Projected scheme.
+# below still needs that exact Historical vs. 2035-2064-Projected scheme.
 # c_group here is plotting-only: Historical = observed years, Projected =
 # every modeled year after that, same two-way split vis_fig_2 uses for
 # visitation.
@@ -7128,7 +7140,7 @@ ggsave(hf_use_fig, filename = "data/park/MORA/Figs/hf_use_fig.jpg",
 
 ##### Water Demand Summary
 
-Summary table: historical vs. mid-century (2035-2065) projected annual visitation
+Summary table: historical vs. mid-century (2035-2064) projected annual visitation
 and water demand for Paradise, observed annual metered water use (for
 comparison against the visitation-based estimate), and observed use-per-visitor
 rates (pre-/post-2019 leak periods). Built for the report's Estimating Water
@@ -7139,7 +7151,7 @@ place.
 ```{r water_demand_summary_table}
 
 # Visitation: mean/min/max annual Paradise visitors, historical (observed)
-# vs. projected (2035-2065 mid-century window), from annual_visitation
+# vs. projected (2035-2064 mid-century window), from annual_visitation
 # (built above in the select_vis chunk).
 visitation_summary <- annual_visitation %>%
   dplyr::filter(group %in% c("Historical", "Projected")) %>%
@@ -7220,7 +7232,7 @@ pdat <- wbm_annual %>%
 
 # Historical reference stats (median, 0.1/0.9 quantile), computed per system
 hist_stats <- pdat %>%
-  dplyr::filter(year < 2013) %>%
+  dplyr::filter(year >= hist_yrs[1] & year <= hist_yrs[2]) %>%
   dplyr::group_by(system) %>%
   dplyr::summarize(hist_median = median(Runoff, na.rm = TRUE),
                    hist_q_low  = quantile(Runoff, .1, na.rm = TRUE),
@@ -7230,8 +7242,8 @@ hist_stats <- pdat %>%
 pdat <- pdat %>% dplyr::left_join(hist_stats, by = "system")
 
 runoff_var <- ggplot(pdat %>%
-  dplyr::mutate(rect_min = ifelse(CF != "Historical", 2035, 1979),
-                rect_max = ifelse(CF != "Historical", 2065, 2012),
+  dplyr::mutate(rect_min = ifelse(CF != "Historical", fut_yrs[1], hist_yrs[1]),
+                rect_max = ifelse(CF != "Historical", fut_yrs[2], hist_yrs[2]),
                 CF = factor(CF, levels = c("Historical", "Less Snowy Dry", "Snowy Wet")))) +
   geom_rect(aes(xmin = rect_min, xmax = rect_max, ymin = -Inf, ymax = Inf),fill = "grey85", linewidth = 0,  alpha = .1) + 
   geom_bar(aes(x = year, y = Runoff, fill = CF), stat = "identity", width = 0.9, position = position_dodge(width = 0.9), color = "black", linewidth = 0.3) +
@@ -7254,7 +7266,7 @@ runoff_var
 
 # Calculate consecutive dry years, per system x CF
 t <- pdat %>%
-  dplyr::filter(year < 2012 | (year >= 2035 & year < 2065)) %>%
+  dplyr::filter((year >= hist_yrs[1] & year <= hist_yrs[2]) | (year >= fut_yrs[1] & year <= fut_yrs[2])) %>%
   dplyr::mutate(r_lt_p1 = ifelse(Runoff <= hist_q_low, 1, 0),
                 r_gt_p90 = ifelse(Runoff  >= hist_q_high, 1, 0),
                 tot = ifelse(Runoff > 0, 1, 0)) %>%
@@ -7324,8 +7336,8 @@ historic <- df %>%
   ungroup() %>%
   # Explore runoff events ONLY:
   dplyr::filter(rolling_3day > 0,
-                # AND only data from 1979-2012
-                year >= hist_yrs[1] & year < hist_yrs[2]) %>%
+                # AND only data from 1980-2012
+                year >= hist_yrs[1] & year <= hist_yrs[2]) %>%
   dplyr::select(rolling_3day) %>%
   dplyr::summarize(QLOW = quantile(rolling_3day, probs = as.numeric(q1)),
                    QHIGH = quantile(rolling_3day, probs = as.numeric(q2)))
@@ -7344,15 +7356,15 @@ sanity_check <- df %>%
   dplyr::filter(rolling_3day >= historic$QHIGH)
 
 stats_precip <- year_counts %>%
-  dplyr::filter(year >= hist_yrs[1] & year < hist_yrs[2] | year >= fut_yrs[1] & year < fut_yrs[2]) %>%
+  dplyr::filter(year >= hist_yrs[1] & year <= hist_yrs[2] | year >= fut_yrs[1] & year <= fut_yrs[2]) %>%
   group_by(cf) %>%
   summarize(count = sum(n_high_days, na.rm = TRUE),
             mean = mean(n_high_days, na.rm = TRUE))
 
 
 ggplot(year_counts %>%
-  dplyr::mutate(rect_min = ifelse(cf != "Historical", 2035, 1979),
-                rect_max = ifelse(cf != "Historical", 2065, 2012),
+  dplyr::mutate(rect_min = ifelse(cf != "Historical", fut_yrs[1], hist_yrs[1]),
+                rect_max = ifelse(cf != "Historical", fut_yrs[2], hist_yrs[2]),
                 CF = factor(cf, levels = c("Historical", "Less Snowy Dry", "Snowy Wet")))) +
   geom_rect(aes(xmin = rect_min, xmax = rect_max, ymin = -Inf, ymax = Inf),fill = "grey85", linewidth = 0,  alpha = .1) + 
   geom_bar(aes(x = year, y = n_high_days, fill = CF), stat = "identity", width = 0.9, position = position_dodge(width = 0.9), color = "black", linewidth = 0.3) +
@@ -7403,8 +7415,8 @@ historic <- df %>%
   ungroup() %>%
   # Explore runoff events ONLY:
   dplyr::filter(rolling_3day > 0,
-                # AND only data from 1979-2012
-                year >= hist_yrs[1] & year < hist_yrs[2]) %>%
+                # AND only data from 1980-2012
+                year >= hist_yrs[1] & year <= hist_yrs[2]) %>%
   dplyr::select(rolling_3day) %>%
   dplyr::summarize(QLOW = quantile(rolling_3day, probs = as.numeric(q1)),
                    QHIGH = quantile(rolling_3day, probs = as.numeric(q2)))
@@ -7423,15 +7435,15 @@ sanity_check <- df %>%
   dplyr::filter(rolling_3day >= historic$QHIGH)
 
 stats_runoff <- year_counts %>%
-  dplyr::filter(year >= hist_yrs[1] & year < hist_yrs[2] | year >= fut_yrs[1] & year < fut_yrs[2]) %>%
+  dplyr::filter(year >= hist_yrs[1] & year <= hist_yrs[2] | year >= fut_yrs[1] & year <= fut_yrs[2]) %>%
   group_by(cf) %>%
   summarize(count = sum(n_high_days, na.rm = TRUE),
             mean = mean(n_high_days, na.rm = TRUE))
 
 
 ggplot(year_counts %>%
-  dplyr::mutate(rect_min = ifelse(cf != "Historical", 2035, 1979),
-                rect_max = ifelse(cf != "Historical", 2065, 2012),
+  dplyr::mutate(rect_min = ifelse(cf != "Historical", fut_yrs[1], hist_yrs[1]),
+                rect_max = ifelse(cf != "Historical", fut_yrs[2], hist_yrs[2]),
                 CF = factor(cf, levels = c("Historical", "Less Snowy Dry", "Snowy Wet")))) +
   geom_rect(aes(xmin = rect_min, xmax = rect_max, ymin = -Inf, ymax = Inf),fill = "grey85", linewidth = 0,  alpha = .1) + 
   geom_bar(aes(x = year, y = n_high_days, fill = CF), stat = "identity", width = 0.9, position = position_dodge(width = 0.9), color = "black", linewidth = 0.3) +
@@ -7469,6 +7481,9 @@ seasonal_wbm <- wbm %>%
                                    month(date) %in% c(6,7,8) ~ "Summer",
                                    month(date) %in% c(9,10,11) ~ "Fall")) %>%
   dplyr::mutate(y = year(date)) %>%
+  # Restrict to the analysis windows (seasonal_stats below feeds the seasonal
+  # % change in the report, so it must not average over all years).
+  dplyr::filter((y >= hist_yrs[1] & y <= hist_yrs[2]) | (y >= fut_yrs[1] & y <= fut_yrs[2])) %>%
   dplyr::select(-c(date,GCM)) %>%
   dplyr::group_by(y,season,CF)%>%
   dplyr::summarize(
@@ -7505,7 +7520,7 @@ print(seasonal_stats)
 
 seasonal_fig <- ggarrange(
   
-  ggplot(seasonal_wbm %>% dplyr::filter(y >= hist_yrs[1] & y < hist_yrs[2] | y >= fut_yrs[1] & y < fut_yrs[2])) +
+  ggplot(seasonal_wbm %>% dplyr::filter(y >= hist_yrs[1] & y <= hist_yrs[2] | y >= fut_yrs[1] & y <= fut_yrs[2])) +
     geom_boxplot(aes(x = factor(season, levels = c("Winter", "Spring", "Summer", "Fall")), 
                      y = rain_in_wbm, fill = CF),
                  outlier.shape = NA,
@@ -7514,7 +7529,7 @@ seasonal_fig <- ggarrange(
     labs(x = "", y = "Rain (in)") +
     scale_fill_manual("", values = plot_colors) +
     theme(legend.position = "bottom", legend.margin = margin(t = -15, b = 0, l = 0, r = 0)),
-  ggplot(seasonal_wbm %>% dplyr::filter(y >= hist_yrs[1] & y < hist_yrs[2] | y >= fut_yrs[1] & y < fut_yrs[2])) +
+  ggplot(seasonal_wbm %>% dplyr::filter(y >= hist_yrs[1] & y <= hist_yrs[2] | y >= fut_yrs[1] & y <= fut_yrs[2])) +
     geom_boxplot(aes(x = factor(season, levels = c("Winter", "Spring", "Summer", "Fall")),  
                      y = snow_in_wbm, fill = CF),
                  outlier.shape = NA,
@@ -7523,7 +7538,7 @@ seasonal_fig <- ggarrange(
     labs(x = "", y = "Snowmelt (in)") +
     scale_fill_manual("", values = plot_colors) +
     theme(legend.position = "bottom", legend.margin = margin(t = -15, b = 0, l = 0, r = 0)),
-  ggplot(seasonal_wbm %>% dplyr::filter(y >= hist_yrs[1] & y < hist_yrs[2] | y >= fut_yrs[1] & y < fut_yrs[2])) +
+  ggplot(seasonal_wbm %>% dplyr::filter(y >= hist_yrs[1] & y <= hist_yrs[2] | y >= fut_yrs[1] & y <= fut_yrs[2])) +
     geom_boxplot(aes(x = factor(season, levels = c("Winter", "Spring", "Summer", "Fall")),  
                      y = aet_in_wbm, fill = CF),
                  outlier.shape = NA,
@@ -7532,7 +7547,7 @@ seasonal_fig <- ggarrange(
     labs(x = "", y = "AET (in)") +
     scale_fill_manual("", values = plot_colors) +
     theme(legend.position = "bottom", legend.margin = margin(t = -15, b = 0, l = 0, r = 0)),
-  ggplot(seasonal_wbm %>% dplyr::filter(y >= hist_yrs[1] & y < hist_yrs[2] | y >= fut_yrs[1] & y < fut_yrs[2])) +
+  ggplot(seasonal_wbm %>% dplyr::filter(y >= hist_yrs[1] & y <= hist_yrs[2] | y >= fut_yrs[1] & y <= fut_yrs[2])) +
     geom_boxplot(aes(x = factor(season, levels = c("Winter", "Spring", "Summer", "Fall")),  
                      y = runoff_in_wbm, fill = CF),
                  outlier.shape = NA,
@@ -7558,8 +7573,8 @@ A plot of the fraction of snowmelt-derived runoff plotted through time across cl
 
 # Daily Snowmelt Statistics
 snowmelt_stats_d <- wbm %>%
-  dplyr::filter(year(date) <= 2012 | year(date) >= 2035, 
-                year(date) < 2065) %>%
+  dplyr::filter((year(date) >= hist_yrs[1] & year(date) <= hist_yrs[2]) |
+                (year(date) >= fut_yrs[1] & year(date) <= fut_yrs[2])) %>%
   dplyr::mutate(melt_run = (melt_in_wbm / (melt_in_wbm + rain_in_wbm)) * runoff_in_wbm,
                               rain_run = (rain_in_wbm / (melt_in_wbm + rain_in_wbm)) * runoff_in_wbm,
                               snow_frac_precip = (precip_in_wbm - rain_in_wbm) / precip_in_wbm,
@@ -7612,7 +7627,7 @@ pdat <- wbm_annual %>%
   dplyr::mutate(CF = factor(CF, levels = c("Historical", "Less Snowy Dry", "Snowy Wet")))
 
 snowmelt_stats <- pdat %>%
- dplyr::filter(year >= hist_yrs[1] & year < hist_yrs[2] | year >= fut_yrs[1] & year < fut_yrs[2]) %>%
+ dplyr::filter(year >= hist_yrs[1] & year <= hist_yrs[2] | year >= fut_yrs[1] & year <= fut_yrs[2]) %>%
   dplyr::group_by(CF) %>%
   dplyr::summarize(melt_frac_min = min(melt_frac),
                   melt_frac_mean = mean(melt_frac),
@@ -7628,8 +7643,8 @@ print(snowmelt_stats)
 
 # Snowmelt Fraction Figure
 sm_fraction_fig <- ggplot(pdat) +
-  # Add shaded region between 2035 and 2065
-  geom_rect(aes(xmin = 2035, xmax = 2065, ymin = -Inf, ymax = Inf), 
+  # Add shaded region between 2035 and 2064
+  geom_rect(aes(xmin = fut_yrs[1], xmax = fut_yrs[2], ymin = -Inf, ymax = Inf), 
             fill = "lightgrey", alpha = 0.1) + 
   # FIX: "type" is not a real ggplot aesthetic (silently dropped), so this
   # background line had no group aesthetic and connected all three CF
@@ -7686,7 +7701,7 @@ ggsave(sm_fig, filename = "data/park/MORA/Figs/snowmelt_fig.jpg",
 
 ```{r spei_plot}
 
-# All years are plotted (observed 2013-2026 included). Only 1979-2012 is used to
+# All years are plotted (observed 2013-2026 included). Only 1980-2012 is used to
 # fit the SPEI reference distribution (see ref.start/ref.end in the spei chunk).
 drought <- ggplot(spei_results, aes(x = ym, y = spei)) +
   geom_rect(aes(xmin = as.Date("2035-01-01"), xmax = as.Date("2065-01-01"), ymin = -Inf, ymax = Inf), 
@@ -7740,7 +7755,7 @@ ggsave(drought, filename = "data/park/MORA/Figs/drought_fig.jpg",
 
 ds_monthly_labeled <- ds_monthly %>%
   dplyr::mutate(scenario_label = ifelse(
-    scenario == "Projected (2035-2065)",
+    scenario == "Projected (2035-2064)",
     paste0(scenario, " - ", CF),
     scenario))
 
@@ -7796,7 +7811,7 @@ monthly_ds_fig <- ggplot(ds_monthly_labeled, aes(x = month)) +
 # comparison across scenarios rather than a time series.
 annual_ds_fig <- ggplot(
   ds_annual %>% dplyr::mutate(scenario_label = ifelse(
-    scenario == "Projected (2035-2065)", paste0(scenario, " - ", CF), scenario)),
+    scenario == "Projected (2035-2064)", paste0(scenario, " - ", CF), scenario)),
   aes(x = scenario_label, y = DS_annual, fill = scenario_label)) +
   geom_col() +
   geom_hline(yintercept = 1, color = "grey30") +

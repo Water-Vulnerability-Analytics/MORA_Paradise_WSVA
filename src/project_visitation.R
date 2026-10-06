@@ -109,7 +109,7 @@
 # numeric `vis` column -- see .proportions_source() below, which builds that
 # table from a method's historical + projected monthly output.
 # `summary_years` is a named list of numeric year vectors, e.g.
-# list(historical = 1980:2012, future = 2035:2065) -- the names become the
+# list(historical = 1980:2012, future = 2035:2064) -- the names become the
 # `period` column in the returned (stacked, not nested) tibble.
 .monthly_proportions_by_period <- function(dat, summary_years) {
 
@@ -117,7 +117,7 @@
   if (!is.list(summary_years) || is.null(names(summary_years)) ||
       any(names(summary_years) == "")) {
     stop("`summary_years` must be a named list of year vectors, e.g. ",
-         "list(historical = 1980:2012, future = 2035:2065).")
+         "list(historical = 1980:2012, future = 2035:2064).")
   }
 
   purrr::imap_dfr(summary_years, function(yrs, period_name) {
@@ -295,7 +295,7 @@ linear_trend <- function(df,
                          obs_cutoff_year = as.numeric(format(Sys.Date(), "%Y")),
                          future_end_year = 2100,
                          output_resolution = c("monthly", "annual"),
-                         summary_years = list(historical = 1980:2012, future = 2035:2065)) {
+                         summary_years = list(historical = 1980:2012, future = 2035:2064)) {
   
   output_resolution <- match.arg(output_resolution)
   prep <- .prep_vis_input(df, date_col, visitor_col, climate_vars, scenario_col,
@@ -456,7 +456,7 @@ annual_growth_rate <- function(df,
                                obs_cutoff_year = as.numeric(format(Sys.Date(), "%Y")),
                                future_end_year = 2100,
                                output_resolution = c("monthly", "annual"),
-                               summary_years = list(historical = 1980:2012, future = 2035:2065)) {
+                               summary_years = list(historical = 1980:2012, future = 2035:2064)) {
 
   if (missing(growth_rate_mid) || is.null(growth_rate_mid)) {
     stop("annual_growth_rate(): `growth_rate_mid` is required (e.g. 0.05 for 5%/year growth).")
@@ -636,7 +636,7 @@ annual_growth_rate <- function(df,
 #'   values (`r`, `t0`). Defaults `t0 = 2010` / `t0 = 2050`; may need
 #'   per-park tuning if `nls()` fails to converge.
 #' @param proj_period Length-2 numeric vector, future summary period for
-#'   `$proj_period_summary`. Default c(2035, 2065).
+#'   `$proj_period_summary`. Default c(2035, 2064).
 #' @param obs_cutoff_year Integer. Years before this use observed
 #'   visitation; years at/after it use the projection. Default current year.
 #' @param future_end_year Integer. Last year to project through. Default
@@ -648,7 +648,7 @@ annual_growth_rate <- function(df,
 #'   plot (expects e.g. `$pink`); falls back to "tomato".
 #' @param summary_years Optional named list of numeric year vectors giving
 #'   one or more periods to summarize monthly seasonality for -- e.g. the
-#'   default `list(historical = 1980:2012, future = 2035:2065)` compares
+#'   default `list(historical = 1980:2012, future = 2035:2064)` compares
 #'   historical monthly proportions against those implied by the projection
 #'   for a future window. Each period's proportions are computed from real
 #'   observed monthly visitation where the period falls in the historical
@@ -713,12 +713,12 @@ gam_logistic <- function(df,
                          smooth_k = 4,
                          hist_nls_start = list(r = 0.05, t0 = 2010),
                          proj_nls_start = list(r = 0.05, t0 = 2050),
-                         proj_period = c(2035, 2065),
+                         proj_period = c(2035, 2064),
                          obs_cutoff_year = as.numeric(format(Sys.Date(), "%Y")),
                          future_end_year = 2100,
                          output_resolution = c("monthly", "annual"),
                          park_pal = NULL,
-                         summary_years = list(historical = 1980:2012, future = 2035:2065)) {
+                         summary_years = list(historical = 1980:2012, future = 2035:2064)) {
 
   output_resolution <- match.arg(output_resolution)
   if (!(isTRUE(smooth_terms) || isFALSE(smooth_terms) || identical(smooth_terms, "auto"))) {
@@ -1032,7 +1032,7 @@ arima_climate <- function(df,
                           obs_cutoff_year = as.numeric(format(Sys.Date(), "%Y")),
                           future_end_year = 2100,
                           output_resolution = c("monthly", "annual"),
-                          summary_years = list(historical = 1980:2012, future = 2035:2065)) {
+                          summary_years = list(historical = 1980:2012, future = 2035:2064)) {
   
   if (!requireNamespace("forecast", quietly = TRUE)) {
     stop("arima_climate() requires the {forecast} package. Install it with ",
@@ -1262,7 +1262,7 @@ fisichelli <- function(df,
                        obs_cutoff_year = as.numeric(format(Sys.Date(), "%Y")),
                        future_end_year = 2100,
                        output_resolution = c("monthly", "annual"),
-                       summary_years = list(historical = 1980:2012, future = 2035:2065)) {
+                       summary_years = list(historical = 1980:2012, future = 2035:2064)) {
   
   if (length(temp_var) != 1) {
     stop("fisichelli(): `temp_var` must name a single temperature column, not a vector.")
