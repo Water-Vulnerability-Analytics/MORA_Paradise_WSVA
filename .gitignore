@@ -60,3 +60,6 @@ Reports/*.docx
 .DS_Store
 *.bak*
 Reports/*.md
+
+# Base R graphics output from non-interactive runs
+Rplots.pdf
