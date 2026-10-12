@@ -2317,6 +2317,7 @@ ggplot() +
     title = "Paradise Creek"
   )
 
+ggsave("data/park/MORA/Figs/Paradise_Creek_USGS.jpg", dpi = 600, width = 7, height = 6)
 
 # Workspace cleanup: these are no longer used after this point.
 rm(max_p, max_q, paradise_q, snotel_p)
@@ -2714,13 +2715,13 @@ Future:
 
 clim_fut <- readRDS("data/park/MORA/clim_fut_extra.rds") 
 
-aoi_gridmet_grid
-
 clim_fut_sf <- clim_fut %>%
   distinct(x, y) %>%
   sf::st_as_sf(coords = c("x", "y"), crs = 4326)
 
 # quick view of the 6 points/grids
+mapview(aoi_gridmet_grid) +
+mapview(clim_pts) +
 mapview(clim_fut_sf) + 
   mapview(system_watershed)
 
@@ -2753,7 +2754,7 @@ final conditions from the historical as the starting conditions for the future.
 # label is a hard knitr error (this document would not render at all).
 # Leaving this at 4 for now to select grids
 # Will calibrate officially once the grids are narrowed down
-hock_coef <- 4
+hock_coef <- 5
 
 # # run historic
 # hist_wbm <- run_NPS_WBM_points(points = clim_pts,
@@ -2947,7 +2948,10 @@ ggplot() +
 ggsave("data/park/MORA/Figs/delta_precip_grid.jpg", dpi = 600)
 
 ################################################################################
+```
 
+
+```{r select_specific_climate_cells}
 # get distinct x,y points
 # we want the top 3 pts based on above
 # I also looked at snow persistence and elevation and the top 2 outer points
@@ -2955,6 +2959,8 @@ ggsave("data/park/MORA/Figs/delta_precip_grid.jpg", dpi = 600)
 select_clim_pts <- clim_pts %>%
   filter(y > 46.81) %>%  # just used the y coords to filter for the top 3
   filter(x < -121.7) # remove the eastern grid
+
+mapview(aoi_gridmet_grid) + mapview(select_clim_pts)
 
 clim_hist <- clim_hist %>%
   filter(y > 46.81) %>%  # just used the y coords to filter for the top 3
@@ -2967,7 +2973,7 @@ clim_fut <- clim_fut %>%
 
 
 # Workspace cleanup: these are no longer used after this point.
-rm(baseline_xy, clim_pts, future_differentials_xy, future_differentials_xy_sf, future_xy, precip_raster, runoff_raster, select_clim_pts, tmean_raster, wbm_xy_stats)
+rm(baseline_xy, clim_pts, future_differentials_xy, future_differentials_xy_sf, future_xy, precip_raster, runoff_raster, tmean_raster, wbm_xy_stats)
 gc()
 ```
 
@@ -3005,27 +3011,27 @@ final conditions from the historical as the starting conditions for the future.
 # FIX: renamed from "wbm_run" - duplicate of the chunk above (see its FIX
 # note). Duplicate chunk labels are a hard knitr error.
 # Adjust to match snotel (if available)
-hock_coef <- 4
+hock_coef <- 5
 
 # run historic
-# hist_wbm <- run_NPS_WBM_points(points = select_clim_pts,
-#                                climate_data = clim_hist,
-#                                Direct_Frac = 0, # CSU ADDITION
-#                                Return_Rate = 1, # CSU ADDITION
-#                                PET_Method = "Oudin",
-#                                hock_coef = hock_coef,
-#                                Snowpack.Init = 0, 
-#                                Soil.Init = 0,
-#                                Shade.Coeff = 1,
-#                                T.Base = 0,
-#                                Soil_mult = 1,
-#                                PET_mult = 1,
-#                                area_weighted = FALSE, 
-#                                aoi = contributing_area, 
-#                                grid = aoi_gridmet_grid,
-#                                ret_final_cond = TRUE,
-#                                use_final = FALSE,
-#                                aggregate = TRUE) 
+ # hist_wbm <- run_NPS_WBM_points(points = select_clim_pts,
+ #                                climate_data = clim_hist,
+ #                                Direct_Frac = 0, # CSU ADDITION
+ #                                Return_Rate = 1, # CSU ADDITION
+ #                                PET_Method = "Oudin",
+ #                                hock_coef = hock_coef,
+ #                                Snowpack.Init = 0, 
+ #                                Soil.Init = 0,
+ #                                Shade.Coeff = 1,
+ #                                T.Base = 0,
+ #                                Soil_mult = 1,
+ #                                PET_mult = 1,
+ #                                area_weighted = FALSE, 
+ #                                aoi = contributing_area, 
+ #                                grid = aoi_gridmet_grid,
+ #                                ret_final_cond = TRUE,
+ #                                use_final = FALSE,
+ #                                aggregate = TRUE) 
 
 # Run future 
 # fut_wbm <- run_NPS_WBM_points(points = select_clim_pts,
@@ -3147,6 +3153,145 @@ rm(all_cfs, all_clim_stats, baseline, centroid_cfs, down_edith_ft2, paradise_wat
 gc()
 ```
 
+
+## - Hock Calibration
+
+Compare simulated snowpack from the historical (GridMET-driven) WBM run against
+observed SNOTEL SWE at Paradise, to assess how well the current `hock_coef`
+(set in the `wbm_run` chunk above) reproduces observed snow accumulation/melt
+timing and magnitude. Note the SNOTEL station is a single point at a lower,
+forested elevation, while the WBM grid cells span the full AOI elevation range,
+so this is an approximate calibration, not an exact match.
+
+```{r hock_calibration}
+
+# Grid-cell mean snowpack across all AOI pixels, per day
+hist_wbm_mean <- wbm_all %>%
+  dplyr::filter(GCM == "GridMET") %>%
+  dplyr::select(date, x, y, snowpack_in_wbm) %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarize(mean_snowpack = mean(snowpack_in_wbm, na.rm = TRUE), .groups = "drop")
+
+# Observed SNOTEL SWE at Paradise
+snotel_paradise <- snotel_daily_tidy %>%
+  dplyr::filter(name == "Paradise") %>%
+  dplyr::select(date, swe_in)
+
+# --- Quantitative fit, across the full period of overlap ---
+hock_compare <- snotel_paradise %>%
+  dplyr::inner_join(hist_wbm_mean, by = "date") %>%
+  tidyr::drop_na(swe_in, mean_snowpack)
+
+rmse_val <- Metrics::rmse(hock_compare$swe_in, hock_compare$mean_snowpack)
+
+# Nash-Sutcliffe Efficiency (1 = perfect fit, 0 = no better than the observed
+# mean, <0 = worse than the observed mean). Hand-computed since hydroGOF isn't
+# in setup.R - flag if you'd rather add that package and use NSE() directly.
+nse_val <- 1 - sum((hock_compare$swe_in - hock_compare$mean_snowpack)^2) /
+  sum((hock_compare$swe_in - mean(hock_compare$swe_in))^2)
+
+message("Hock coef: ", hock_coef,
+       " | RMSE: ", round(rmse_val, 2), " in",
+       " | NSE: ", round(nse_val, 3))
+
+# Collect model fit statistics so they are saved to a table (written in the
+# run-methods chunk), not only printed to the console.
+fit_stats <- tibble::tibble(
+  model = "Hock snowmelt calibration (WBM vs. Paradise SNOTEL SWE)",
+  statistic = c("hock_coef", "RMSE (in)", "NSE", "overlap_start", "overlap_end"),
+  value = c(as.character(hock_coef), signif(rmse_val, 4), signif(nse_val, 4),
+            as.character(min(hock_compare$date)), as.character(max(hock_compare$date))))
+
+# --- Visual check for one selected water year ---
+# calc_water_year() is sourced from src/calc_water_year.R via setup.R
+calibration_water_year <- 2020
+
+hist_wbm_mean_wy <- hist_wbm_mean %>%
+  dplyr::mutate(water_year = calc_water_year(date)) %>%
+  dplyr::filter(water_year == calibration_water_year)
+
+ggplot(hist_wbm_mean_wy %>%
+    dplyr::left_join(snotel_paradise, by = "date"),
+  aes(x = date)
+) +
+  geom_line(aes(y = mean_snowpack, color = "WBM MEAN"), linewidth = 1) +
+  geom_line(aes(y = swe_in, color = "SNOTEL"), linewidth = 1) +
+  labs(x = "", y = "Snowpack (in)",
+       title = paste0("Water Year ", calibration_water_year,
+                      " | Hock Coef: ", hock_coef, " | Overall NSE: ", round(nse_val, 2))) +
+  theme_wsva() +
+  scale_color_manual("", values = c("WBM GRID" = "#1b6ca8", "WBM MEAN" = "black", "SNOTEL" = "#b02a24")) +
+  theme(legend.position = "bottom")
+
+ggsave(paste0("data/park/MORA/Figs/2024_Hock_", hock_coef, "_WY", calibration_water_year, ".jpg"),
+      width = 5, height = 4, dpi = 600)
+
+
+# Workspace cleanup: these are no longer used after this point.
+rm(hist_wbm_mean, hist_wbm_mean_wy, hist_wbm_snowpack, hist_wbm_snowpack_wy, hock_coef, hock_compare, nse_val, rmse_val, snotel_paradise)
+gc()
+```
+
+To calibrate, adjust `hock_coef` in the `wbm_run` chunk above, rerun the historical
+WBM (and this section), and compare RMSE/NSE across attempts - higher NSE and
+lower RMSE indicate a better match to observed SNOTEL SWE.
+
+## - Cumulative Precip Check
+
+Same comparison as above, but for cumulative precipitation instead of snowpack -
+a quick sanity check on the precip forcing driving the WBM. SNOTEL's PREC.I is
+already reported as water-year-to-date cumulative, so only the WBM side needs
+a `cumsum()`.
+
+```{r cumulative_precip}
+
+# Historical (GridMET-driven) WBM precip, per pixel, cumulative within the
+# selected water year
+hist_wbm_precip_wy <- wbm_all %>%
+  dplyr::filter(GCM == "GridMET") %>%
+  dplyr::select(date, x, y, precip_in_wbm) %>%
+  dplyr::mutate(water_year = calc_water_year(date)) %>%
+  dplyr::filter(water_year == calibration_water_year) %>%
+  dplyr::arrange(x, y, date) %>%
+  dplyr::group_by(x, y) %>%
+  dplyr::mutate(cum_precip_in_wbm = cumsum(precip_in_wbm)) %>%
+  dplyr::ungroup()
+
+# Grid-cell mean cumulative precip across all AOI pixels, per day
+hist_wbm_precip_mean_wy <- hist_wbm_precip_wy %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarize(mean_cum_precip = mean(cum_precip_in_wbm, na.rm = TRUE), .groups = "drop")
+
+# Observed cumulative SNOTEL precip at Paradise (PREC.I is already WY-cumulative)
+snotel_precip_paradise_wy <- snotel_daily_tidy %>%
+  dplyr::filter(name == "Paradise", water_year == calibration_water_year) %>%
+  dplyr::select(date, precip_in)
+
+ggplot(
+  hist_wbm_precip_wy %>%
+    dplyr::left_join(snotel_precip_paradise_wy, by = "date"),
+  aes(x = date)
+) +
+  geom_line(aes(y = cum_precip_in_wbm, color = "WBM GRID", group = paste0(x, y)), linewidth = 1) +
+  geom_line(data = hist_wbm_precip_mean_wy,
+            aes(y = mean_cum_precip, color = "WBM MEAN"), linewidth = 1) +
+  geom_line(aes(y = precip_in, color = "SNOTEL"), linewidth = 1) +
+  labs(x = "", y = "Cumulative Precip (in)",
+       title = paste0("Water Year ", calibration_water_year, " - Cumulative Precip")) +
+  theme_wsva() +
+  scale_color_manual("", values = c("WBM GRID" = "#1b6ca8", "WBM MEAN" = "black", "SNOTEL" = "#b02a24")) +
+  theme(legend.position = "bottom")
+
+ggsave(paste0("data/park/MORA/Figs/CumulativePrecip_WY", calibration_water_year, ".jpg"),
+      width = 7, height = 4, dpi = 600)
+
+
+# Workspace cleanup: these are no longer used after this point.
+rm(calibration_water_year, hist_wbm_precip_mean_wy, hist_wbm_precip_wy, snotel_precip_paradise_wy)
+gc()
+```
+
+
 Classic NPS climate-future selection plots temperature and precipitation deltas
 against each other to define "hot/warm" x "wet/dry" corners (demonstrated above).
 For MORA, snow -- not temperature -- turns out to be the bigger driver of runoff
@@ -3191,6 +3336,8 @@ selected_cfs <- selected_gcms[[1]] %>%
 
 selected_gcms[[2]]
 
+ggsave(selected_gcms[[2]], filename = "data/park/MORA/Figs/Climate_Selection_ww_hd.tiff", width = 9, height = 7,  dpi = 600)
+
 ggplot(future_differentials %>% 
   dplyr::left_join(selected_gcms[[1]] %>%
                      dplyr::select(c(GCM, "select_CF" = CF)), by = "GCM") %>%
@@ -3214,8 +3361,17 @@ ggplot(future_differentials %>%
   # "Warm"/companion pairing - while fixing the two colors that failed
   # contrast outright (gray80 -> the validated "Other" gray; the pale
   # rosybrown1/#c1dff5 pastels -> readable warm/cool steps).
-  scale_fill_manual("", values = c(nps_pal$red, nps_pal$blue, "black", "#595959", "#b0431f", "#5a9bc4"), na.value="gray85")
+  scale_fill_manual("", 
+                    values = c(nps_pal$red, 
+                               "lightblue", 
+                               "black", 
+                               "gray70", 
+                               "pink", 
+                               nps_pal$blue), 
+                               na.value="gray20")
 
+
+ggsave(filename = "data/park/MORA/Figs/differentials_ww_hd.tiff", width = 7, height = 5,  dpi = 600)
 
 ```
 
@@ -3282,10 +3438,16 @@ ggplot(future_differentials %>%
   # "Warm"/companion pairing - while fixing the two colors that failed
   # contrast outright (gray80 -> the validated "Other" gray; the pale
   # rosybrown1/#c1dff5 pastels -> readable warm/cool steps).
-  scale_fill_manual("", values = c(nps_pal$red, nps_pal$blue, "black", "#595959", "#b0431f", "#5a9bc4"), na.value="gray85")
+  scale_fill_manual("", 
+                    values = c(nps_pal$red, 
+                               "lightblue", 
+                               "black", 
+                               "gray70", 
+                               "pink", 
+                               nps_pal$blue), 
+                               na.value="gray20")
 
-
-
+ggsave(filename = "data/park/MORA/Figs/differentials.tiff", width = 7, height = 5,  dpi = 600)
 
 # Workspace cleanup: these are no longer used after this point.
 rm(x_name, y_name)
@@ -3306,153 +3468,6 @@ wbm <- wbm_all %>%
  
 setorder(wbm, date)
 
-```
-
-## - Hock Calibration
-
-Compare simulated snowpack from the historical (GridMET-driven) WBM run against
-observed SNOTEL SWE at Paradise, to assess how well the current `hock_coef`
-(set in the `wbm_run` chunk above) reproduces observed snow accumulation/melt
-timing and magnitude. Note the SNOTEL station is a single point at a lower,
-forested elevation, while the WBM grid cells span the full AOI elevation range,
-so this is an approximate calibration, not an exact match.
-
-```{r hock_calibration}
-
-# Historical (GridMET-driven) WBM run - wbm_all is still per-pixel at this point
-hist_wbm_snowpack <- wbm_all %>%
-  dplyr::filter(GCM == "GridMET") %>%
-  dplyr::select(date, x, y, snowpack_in_wbm)
-
-# Grid-cell mean snowpack across all AOI pixels, per day
-hist_wbm_mean <- hist_wbm_snowpack %>%
-  dplyr::group_by(date) %>%
-  dplyr::summarize(mean_snowpack = mean(snowpack_in_wbm, na.rm = TRUE), .groups = "drop")
-
-# Observed SNOTEL SWE at Paradise
-snotel_paradise <- snotel_daily_tidy %>%
-  dplyr::filter(name == "Paradise") %>%
-  dplyr::select(date, swe_in)
-
-# --- Quantitative fit, across the full period of overlap ---
-hock_compare <- snotel_paradise %>%
-  dplyr::inner_join(hist_wbm_mean, by = "date") %>%
-  tidyr::drop_na(swe_in, mean_snowpack)
-
-rmse_val <- Metrics::rmse(hock_compare$swe_in, hock_compare$mean_snowpack)
-
-# Nash-Sutcliffe Efficiency (1 = perfect fit, 0 = no better than the observed
-# mean, <0 = worse than the observed mean). Hand-computed since hydroGOF isn't
-# in setup.R - flag if you'd rather add that package and use NSE() directly.
-nse_val <- 1 - sum((hock_compare$swe_in - hock_compare$mean_snowpack)^2) /
-  sum((hock_compare$swe_in - mean(hock_compare$swe_in))^2)
-
-message("Hock coef: ", hock_coef,
-       " | RMSE: ", round(rmse_val, 2), " in",
-       " | NSE: ", round(nse_val, 3))
-
-# Collect model fit statistics so they are saved to a table (written in the
-# run-methods chunk), not only printed to the console.
-fit_stats <- tibble::tibble(
-  model = "Hock snowmelt calibration (WBM vs. Paradise SNOTEL SWE)",
-  statistic = c("hock_coef", "RMSE (in)", "NSE", "overlap_start", "overlap_end"),
-  value = c(as.character(hock_coef), signif(rmse_val, 4), signif(nse_val, 4),
-            as.character(min(hock_compare$date)), as.character(max(hock_compare$date))))
-
-# --- Visual check for one selected water year ---
-# calc_water_year() is sourced from src/calc_water_year.R via setup.R
-calibration_water_year <- 2020
-
-hist_wbm_snowpack_wy <- hist_wbm_snowpack %>%
-  dplyr::mutate(water_year = calc_water_year(date)) %>%
-  dplyr::filter(water_year == calibration_water_year)
-
-hist_wbm_mean_wy <- hist_wbm_mean %>%
-  dplyr::mutate(water_year = calc_water_year(date)) %>%
-  dplyr::filter(water_year == calibration_water_year)
-
-ggplot(
-  hist_wbm_snowpack_wy %>%
-    dplyr::left_join(snotel_paradise, by = "date"),
-  aes(x = date)
-) +
-  geom_line(aes(y = snowpack_in_wbm, color = "WBM GRID", group = paste0(x, y)), linewidth = 1) +
-  geom_line(data = hist_wbm_mean_wy,
-            aes(y = mean_snowpack, color = "WBM MEAN"), linewidth = 1) +
-  geom_line(aes(y = swe_in, color = "SNOTEL"), linewidth = 1) +
-  labs(x = "", y = "Snowpack (in)",
-       title = paste0("Water Year ", calibration_water_year,
-                      " | Hock Coef: ", hock_coef, " | Overall NSE: ", round(nse_val, 2))) +
-  theme_wsva() +
-  scale_color_manual("", values = c("WBM GRID" = "#1b6ca8", "WBM MEAN" = "black", "SNOTEL" = "#b02a24")) +
-  theme(legend.position = "bottom")
-
-ggsave(paste0("data/park/MORA/Figs/2024_Hock_4", hock_coef, "_WY", calibration_water_year, ".jpg"),
-      width = 7, height = 4, dpi = 600)
-
-
-# Workspace cleanup: these are no longer used after this point.
-rm(hist_wbm_mean, hist_wbm_mean_wy, hist_wbm_snowpack, hist_wbm_snowpack_wy, hock_coef, hock_compare, nse_val, rmse_val, snotel_paradise)
-gc()
-```
-
-To calibrate, adjust `hock_coef` in the `wbm_run` chunk above, rerun the historical
-WBM (and this section), and compare RMSE/NSE across attempts - higher NSE and
-lower RMSE indicate a better match to observed SNOTEL SWE.
-
-## - Cumulative Precip Check
-
-Same comparison as above, but for cumulative precipitation instead of snowpack -
-a quick sanity check on the precip forcing driving the WBM. SNOTEL's PREC.I is
-already reported as water-year-to-date cumulative, so only the WBM side needs
-a `cumsum()`.
-
-```{r cumulative_precip}
-
-# Historical (GridMET-driven) WBM precip, per pixel, cumulative within the
-# selected water year
-hist_wbm_precip_wy <- wbm_all %>%
-  dplyr::filter(GCM == "GridMET") %>%
-  dplyr::select(date, x, y, precip_in_wbm) %>%
-  dplyr::mutate(water_year = calc_water_year(date)) %>%
-  dplyr::filter(water_year == calibration_water_year) %>%
-  dplyr::arrange(x, y, date) %>%
-  dplyr::group_by(x, y) %>%
-  dplyr::mutate(cum_precip_in_wbm = cumsum(precip_in_wbm)) %>%
-  dplyr::ungroup()
-
-# Grid-cell mean cumulative precip across all AOI pixels, per day
-hist_wbm_precip_mean_wy <- hist_wbm_precip_wy %>%
-  dplyr::group_by(date) %>%
-  dplyr::summarize(mean_cum_precip = mean(cum_precip_in_wbm, na.rm = TRUE), .groups = "drop")
-
-# Observed cumulative SNOTEL precip at Paradise (PREC.I is already WY-cumulative)
-snotel_precip_paradise_wy <- snotel_daily_tidy %>%
-  dplyr::filter(name == "Paradise", water_year == calibration_water_year) %>%
-  dplyr::select(date, precip_in)
-
-ggplot(
-  hist_wbm_precip_wy %>%
-    dplyr::left_join(snotel_precip_paradise_wy, by = "date"),
-  aes(x = date)
-) +
-  geom_line(aes(y = cum_precip_in_wbm, color = "WBM GRID", group = paste0(x, y)), linewidth = 1) +
-  geom_line(data = hist_wbm_precip_mean_wy,
-            aes(y = mean_cum_precip, color = "WBM MEAN"), linewidth = 1) +
-  geom_line(aes(y = precip_in, color = "SNOTEL"), linewidth = 1) +
-  labs(x = "", y = "Cumulative Precip (in)",
-       title = paste0("Water Year ", calibration_water_year, " - Cumulative Precip")) +
-  theme_wsva() +
-  scale_color_manual("", values = c("WBM GRID" = "#1b6ca8", "WBM MEAN" = "black", "SNOTEL" = "#b02a24")) +
-  theme(legend.position = "bottom")
-
-ggsave(paste0("data/park/MORA/Figs/CumulativePrecip_WY", calibration_water_year, ".jpg"),
-      width = 7, height = 4, dpi = 600)
-
-
-# Workspace cleanup: these are no longer used after this point.
-rm(calibration_water_year, hist_wbm_precip_mean_wy, hist_wbm_precip_wy, snotel_precip_paradise_wy)
-gc()
 ```
 
 ## - Routing
@@ -6767,6 +6782,7 @@ nps_tiles_climate <- get_nps_basemap(aoi = climate_fig_extent, style = "standard
 contributing_area_3857 <- sf::st_transform(contributing_area, 3857)
 aoi_gridmet_grid_3857   <- sf::st_transform(aoi_gridmet_grid, 3857)
 snotel_sites_3857       <- sf::st_transform(snotel_sites, 3857)
+select_grids_3857       <- sf::st_transform(select_clim_pts, 3857)
 
 climate_fig_bbox <- climate_fig_extent %>%
   sf::st_transform(3857) %>%
@@ -6780,11 +6796,13 @@ climate_figure <-
   ggplot() +
   geom_nps_basemap(nps_tiles_climate) +
   # 1. Base layer: the recharge area polygon
-  geom_sf(data = contributing_area_3857, aes(fill = "Contributing Area"),
-          color = "dodgerblue4", linewidth = 1, alpha = 0.2) +
+   geom_sf(data = site_fig_watersheds_3857, aes(fill = system),
+          color = "black", linewidth = 0.25, alpha = 0.2) +
   # 2. Grid layer: selected GridMET cells
   geom_sf(data = aoi_gridmet_grid_3857, aes(color = "Climate Grid"),
           fill = NA, linewidth = 1) +
+  geom_sf(data = select_grids_3857, aes(shape = "Selected Climate Grid"),
+          color = "yellow", size = 5, fill = "yellow") +
   # 3. Points layer: filtered climate centroids, labeled by station name
   # (snotel_sites carries the station name in "name", same field used
   # everywhere else in this doc, e.g. filter(name == "Paradise")).
@@ -6796,7 +6814,8 @@ climate_figure <-
                             fill = scales::alpha("white", 0.7)) +
   scale_fill_manual(name = "", values = c("Contributing Area" = "dodgerblue")) +
   scale_color_manual(name = "", values = c("Climate Grid" = "red")) +
-  scale_shape_manual(name = "", values = c("SNOTEL/Weather Station" = 21)) +
+  scale_shape_manual(name = "", values = c("SNOTEL/Weather Station" = 21,
+                                           "Selected Climate Grid" = 22)) +
   ggspatial::annotation_scale(location = "bl", width_hint = 0.3) +
   ggspatial::annotation_north_arrow(location = "tr", which_north = "true",
                                     style = ggspatial::north_arrow_fancy_orienteering()) +
@@ -6808,7 +6827,6 @@ climate_figure <-
 
 climate_figure
 
-dir.create("data/park/MORA/Figs", showWarnings = FALSE, recursive = TRUE)
 ggsave("data/park/MORA/Figs/climate_grid_fig.jpg", climate_figure, width = 5, height = 5, dpi = 600)
 
 ```
