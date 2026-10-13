@@ -974,7 +974,7 @@ ggplot(stat_df, aes(x = x, y = y, fill = persistence)) +
   geom_raster() +
   facet_wrap(~period, ncol = 5) +
   scale_fill_gradient2(
-  name = "Snow Persistence\n(5-Yr Sens Slope / yr)",
+  name = "Snow Persistence\n(5-Yr Moving Mean)",
   low = "#b2182b",      # Red for declining persistence
   mid = "#f7f7f7",      # Neutral white/light gray at zero
   high = "#2166ac",     # Blue for increasing persistence
@@ -992,7 +992,7 @@ ggplot(stat_df, aes(x = x, y = y, fill = persistence)) +
     legend.position = "right"
   ) +
   labs(
-    title = "5-Year Moving Sens Slope Snow Persistence (2000–2026)",
+    title = "5-Year Moving Mean Snow Persistence (2000–2026)",
     subtitle = "Paradise River Watershed (+2km Buffer)"
   )
 
@@ -1168,6 +1168,64 @@ system_watershed_sp
 # Workspace cleanup: these are no longer used after this point.
 rm(aoi_proj, sp_extracted, system_watershed_sp, ts_df)
 gc()
+```
+
+Snow persistence trend by candidate system (Appendix A): watershed-mean annual
+snow persistence for each candidate catchment, with Sen's slope and a
+Mann-Kendall test. Trends are reported for the full record and for 2001-2020
+only, because the 2021-onward rasters come from NASA's reprocessed MOD10A2
+collection 6.1, which differs noticeably from the earlier collection in the
+Pacific Northwest (see note above).
+
+```{r sp_trend_by_system}
+
+sp_systems <- list("Edith Current" = system_watershed,
+                   "Edith Downstream" = down_edith_creek_watershed,
+                   "Paradise GW" = paradise_river_watershed)
+
+sp_system_ts <- purrr::imap_dfr(sp_systems, function(ws, sys_name) {
+  ws_proj <- sf::st_transform(ws, crs = terra::crs(sp_stack))
+  terra::extract(sp_stack, terra::vect(ws_proj), fun = mean, na.rm = TRUE) %>%
+    dplyr::select(-ID) %>%
+    tidyr::pivot_longer(dplyr::everything(), names_to = "year_label", values_to = "mean_sp") %>%
+    dplyr::mutate(year = as.numeric(stringr::str_extract(year_label, "\\d{4}")),
+                  system = sys_name)
+}) %>%
+  dplyr::filter(!is.na(mean_sp))
+
+sp_trend <- tidyr::crossing(system = names(sp_systems),
+                            period = c("Full record", "2001-2020")) %>%
+  dplyr::mutate(stats = purrr::map2(system, period, function(sys, per) {
+    d <- sp_system_ts %>%
+      dplyr::filter(system == sys,
+                    per == "Full record" | (year >= 2001 & year <= 2020)) %>%
+      dplyr::arrange(year)
+    tibble::tibble(first_year = min(d$year), last_year = max(d$year), n_years = nrow(d),
+                   mean_sp = mean(d$mean_sp),
+                   sens_slope_per_yr = as.numeric(trend::sens.slope(d$mean_sp)$estimates),
+                   mk_p_value = trend::mk.test(d$mean_sp)$p.value)
+  })) %>%
+  tidyr::unnest(stats)
+
+print(sp_trend)
+readr::write_csv(sp_trend, "data/park/MORA/Tables/sp_trend_by_system.csv")
+
+sp_ts_fig <- ggplot(sp_system_ts, aes(x = year, y = mean_sp, color = system)) +
+  geom_vline(xintercept = 2020.5, linetype = "dashed", color = "gray50") +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.8) +
+  scale_color_manual("", values = c("Edith Current" = "#1b6ca8", "Edith Downstream" = "#459a74", "Paradise GW" = "#a1631f")) +
+  labs(x = NULL, y = "Mean annual snow persistence",
+       caption = "Dashed line: rasters from 2021 onward use MOD10A2 collection 6.1.") +
+  theme_wsva()
+
+sp_ts_fig
+
+ggsave(sp_ts_fig, filename = "data/park/MORA/Figs/sp_timeseries_by_system.jpg",
+       dpi = 600, width = 7, height = 4)
+
+rm(sp_systems)
+
 ```
 
 Moving-average windows smooth out multi-year variations, making it difficult to isolate elevation-dependent responses or single-season ENSO (El Niño / La Niña) signals.  To address this, the analytical framework can be restructured in two main ways: elevation-binned trend metrics and ENSO-conditioned anomaly decomposition.
@@ -2922,8 +2980,8 @@ Run routing function
 #                                Soil_mult = 1,
 #                                PET_mult = 1,
 #                                area_weighted = FALSE,
-#                                aoi = contributing_area,
-#                                grid = aoi_gridmet_,
+#                                aoi = basin,
+#                                grid = aoi_gridmet_basin,
 #                                ret_final_cond = FALSE,
 #                                use_final = FALSE,
 #                                aggregate = TRUE)
@@ -3379,6 +3437,24 @@ hydro_shift_fig
 
 ggsave(hydro_shift_fig, filename = "data/park/MORA/Figs/hydrograph_shift_fig.jpg",
        dpi = 600, width = 9, height = 8)
+
+# Summary of the routed hydrographs (Appendix B): timing and size of the peak
+# in the mean daily hydrograph, and mean late-summer (August-September)
+# discharge, by system and climate future.
+hydrograph_summary <- hydro_grid_dat %>%
+  dplyr::group_by(system, CF) %>%
+  dplyr::summarize(peak_date = format(doy_date[which.max(disc_mean)], "%b %d"),
+                   peak_doy = doy[which.max(disc_mean)],
+                   peak_gpm = max(disc_mean),
+                   aug_sep_mean_gpm = mean(disc_mean[doy >= 213 & doy <= 273]),
+                   .groups = "drop") %>%
+  dplyr::group_by(system) %>%
+  dplyr::mutate(peak_shift_days = peak_doy[CF == "Historical"] - peak_doy,
+                aug_sep_pct_change = 100 * (aug_sep_mean_gpm / aug_sep_mean_gpm[CF == "Historical"] - 1)) %>%
+  dplyr::ungroup()
+
+print(hydrograph_summary)
+readr::write_csv(hydrograph_summary, "data/park/MORA/Tables/hydrograph_summary.csv")
 
 rm(hydro_grid_dat, hydro_grid_plot_dat, future_cfs)
 
@@ -4259,12 +4335,14 @@ mod_peak3d <- lm(log1p(turbidity_peak_3d) ~ precip_3day * days_since_large_event
 summary(mod_sameday)
 summary(mod_peak3d)
 
-print(data.frame(
+turbidity_models <- data.frame(
   model = c("Same-day turbidity", "Peak turbidity, next 3 days"),
   n = c(nobs(mod_sameday), nobs(mod_peak3d)),
   r_squared = c(summary(mod_sameday)$r.squared, summary(mod_peak3d)$r.squared),
   aic = c(AIC(mod_sameday), AIC(mod_peak3d))
-))
+)
+print(turbidity_models)
+readr::write_csv(turbidity_models, "data/park/MORA/Tables/turbidity_dryness_models.csv")
 
 ```
 
@@ -6419,7 +6497,7 @@ ggsave(vis_fig_final, filename = "data/park/MORA/Figs/vis_fig_final.jpg",
 clim_vis_dat <- annual_visitation %>%
   dplyr::filter(source == "observed") %>%
   dplyr::inner_join(
-    wbm_annual %>% dplyr::filter(CF == "Historical") %>% dplyr::select(year, tmean_F),
+    wbm_annual %>% dplyr::filter(CF == "Historical") %>% dplyr::select(year, tmean_F, snowpack_in_wbm),
     by = "year"
   )
 
@@ -6428,7 +6506,7 @@ ggplot(clim_vis_dat, aes(x = snowpack_in_wbm, y = visitors_mid)) +
   geom_smooth(method = "lm", se = FALSE, color = "black", lwd = 2, lineend = "round") +
   geom_smooth(method = "lm", se = FALSE, color = pal$darkblue, lwd = 1.5, lineend = "round") +
   theme_wsva() +
-  labs(x = "Mean Annual Temperature (F)", y = "Annual Visitors (Paradise)")
+  labs(x = "Maximum Annual Snowpack (in)", y = "Annual Visitors (Paradise)")
 
 # The original "Plot model performance comparison" block (monthly-aggregated
 # GAM vs. annual GAM vs. observed, via a "comparison_df") is removed rather
@@ -7233,6 +7311,18 @@ ds_fig
 ggsave(ds_fig, filename = "data/park/MORA/Figs/ds_fig.jpg",
        dpi = 600, width = 7, height = 9)
 
+
+# Tightest month (lowest monthly supply:demand) for each system, demand
+# scenario, and climate future (Appendix A)
+ds_monthly_tightest <- ds_monthly %>%
+  dplyr::group_by(system, scenario, CF) %>%
+  dplyr::slice_min(SD, n = 1, with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
+  dplyr::transmute(system, scenario, CF, month = month.abb[month],
+                   demand_gal = demand_gal_mid, supply_gal, DS, SD)
+
+print(ds_monthly_tightest)
+readr::write_csv(ds_monthly_tightest, "data/park/MORA/Tables/ds_monthly_tightest.csv")
 ```
 
 #### Wildfire Hazard Potential (WHP) Map
