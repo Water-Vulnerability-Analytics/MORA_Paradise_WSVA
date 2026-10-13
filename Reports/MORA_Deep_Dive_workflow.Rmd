@@ -2693,7 +2693,8 @@ ggsave(paste0("data/park/MORA/Figs/2024_Hock_", hock_coef, "_WY", calibration_wa
 
 
 # Workspace cleanup: these are no longer used after this point.
-rm(calibration_water_year, hist_wbm_mean, hist_wbm_mean_wy, hock_coef, hock_compare, nse_val, rmse_val, snotel_paradise)
+# hock_coef is kept: the Nisqually basin WBM run below uses it.
+rm(calibration_water_year, hist_wbm_mean, hist_wbm_mean_wy, hock_compare, nse_val, rmse_val, snotel_paradise)
 gc()
 ```
 
@@ -6422,7 +6423,7 @@ clim_vis_dat <- annual_visitation %>%
     by = "year"
   )
 
-ggplot(clim_vis_dat, aes(x = tmean_F, y = visitors_mid)) +
+ggplot(clim_vis_dat, aes(x = snowpack_in_wbm, y = visitors_mid)) +
   geom_point(size = 2) +
   geom_smooth(method = "lm", se = FALSE, color = "black", lwd = 2, lineend = "round") +
   geom_smooth(method = "lm", se = FALSE, color = pal$darkblue, lwd = 1.5, lineend = "round") +
