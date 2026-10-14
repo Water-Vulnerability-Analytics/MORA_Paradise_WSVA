@@ -2940,7 +2940,8 @@ setorder(wbm, date)
 
 ## - Routing
 
-Run routing function
+Run routing function for nisqually watershed for soft evaluation of performance
+of WBM and routing for representing flow in this region.
 
 ```{r routing_model}
 
@@ -2968,12 +2969,12 @@ Run routing function
 
 # # run historic
 # basin_wbm <- run_NPS_WBM_points(points = clim_pts_basin,
-#                                climate_data = clim_basin,
-#                                Direct_Frac = 0, # CSU ADDITION
-#                                Return_Rate = 1, # CSU ADDITION
-#                                PET_Method = "Oudin",
-#                                hock_coef = hock_coef,
-#                                Snowpack.Init = 0,
+#                                 climate_data = clim_basin,
+#                                 Direct_Frac = 0, # CSU ADDITION
+#                                 Return_Rate = 1, # CSU ADDITION
+#                                 PET_Method = "Oudin",
+#                                 hock_coef = hock_coef,
+#                                 Snowpack.Init = 0,
 #                                Soil.Init = 0,
 #                                Shade.Coeff = 1,
 #                                T.Base = 0,
@@ -2985,8 +2986,8 @@ Run routing function
 #                                ret_final_cond = FALSE,
 #                                use_final = FALSE,
 #                                aggregate = TRUE)
-#  
-# saveRDS(basin_wbm, "data/park/MORA/basin_wbm.rds")
+
+#saveRDS(basin_wbm, "data/park/MORA/basin_wbm.rds")
 basin_wbm <- readRDS("data/park/MORA/basin_wbm.rds")
 
 
@@ -3029,21 +3030,110 @@ cal_dat <- mod_dat %>%
  dplyr::filter(year(date) %in% c(min(year(vic_dat$date)):max(year(vic_dat$date))))
 
 
-# Run routing model for average flow - manually calibrate (adjust parameters
-# to achieve best fit (by checking NSE and Bias below))
-routing <-  runoff_routing_gw(df = cal_dat, 
+# --- Routing parameter optimization (maximize NSE) -------------------------
+# Previously set by hand (tau_q = 3, tau_s = 100, vs = 0.34, loss = 0). Here
+# the parameters are fit to observed discharge in two steps: (1) a random
+# search over the ranges below, then (2) bounded local optimization
+# (L-BFGS-B) started from the best few random sets. To fix a parameter, set
+# its lower and upper bounds equal. Routing runs over the full record (from
+# 1981) so the slow store is warmed up before the evaluation period; NSE is
+# scored only on the calibration dates (the VIC overlap, cal_dat).
+routing_bounds <- tibble::tribble(
+  ~param,  ~lower, ~upper,
+  "tau_q",    0.5,     30,   # quickflow recession (days)
+  "tau_s",     10,    400,   # slowflow recession (days)
+  "vs",      0.05,   0.99,   # fraction of runoff routed as slowflow
+  "loss",       0,    0.5    # fraction of slowflow lost to deep groundwater
+)
+routing_n_random <- 500      # random parameter sets in step 1
+routing_n_starts <- 5        # best random sets used as optim() starts
+
+routing_input <- mod_dat %>%
+  dplyr::filter(!is.na(runoff_m3s)) %>%
+  dplyr::arrange(date)
+routing_cal_idx <- routing_input$date %in% cal_dat$date
+
+# NSE for one named parameter vector
+routing_nse <- function(par) {
+  sim <- runoff_routing_gw(df = routing_input,
+                           runoff_col = "runoff_m3s",
+                           date_col = "date",
+                           tau_q = par[["tau_q"]],
+                           tau_s = par[["tau_s"]],
+                           vs = par[["vs"]],
+                           loss = par[["loss"]],
+                           baseflow = 0,
+                           delay = 0,
+                           slow_only = TRUE,
+                           max_inf = 5000)$Q_tot
+  NSE(obs = routing_input$discharge_m3s[routing_cal_idx], sim = sim[routing_cal_idx])
+}
+
+free_par  <- routing_bounds$lower < routing_bounds$upper
+fixed_par <- stats::setNames(routing_bounds$lower[!free_par], routing_bounds$param[!free_par])
+full_par  <- function(x) c(stats::setNames(x, routing_bounds$param[free_par]), fixed_par)
+
+# Step 1: random search
+set.seed(2026)
+routing_random <- purrr::map_dfr(seq_len(routing_n_random), function(i) {
+  x <- stats::runif(sum(free_par), routing_bounds$lower[free_par], routing_bounds$upper[free_par])
+  tibble::as_tibble_row(c(full_par(x), nse = routing_nse(full_par(x))))
+}) %>%
+  dplyr::arrange(dplyr::desc(nse))
+
+# Step 2: bounded local optimization from the best random sets
+routing_fits <- purrr::map_dfr(seq_len(routing_n_starts), function(i) {
+  start <- unlist(routing_random[i, routing_bounds$param[free_par]])
+  fit <- stats::optim(par = start,
+                      fn = function(x) -routing_nse(full_par(x)),
+                      method = "L-BFGS-B",
+                      lower = routing_bounds$lower[free_par],
+                      upper = routing_bounds$upper[free_par])
+  tibble::as_tibble_row(c(full_par(fit$par), nse = -fit$value, convergence = fit$convergence))
+}) %>%
+  dplyr::arrange(dplyr::desc(nse))
+
+routing_best <- as.list(routing_fits[1, ])
+routing_fits
+routing_best
+
+# Split-sample check of the best set: NSE in each half of the calibration
+# period. A large drop between halves would point to overfitting.
+routing_halves <- split(seq_along(routing_input$date)[routing_cal_idx],
+                        routing_input$date[routing_cal_idx] <
+                          stats::median(routing_input$date[routing_cal_idx]))
+routing_best_sim <- runoff_routing_gw(df = routing_input, runoff_col = "runoff_m3s", date_col = "date",
+                                      tau_q = routing_best$tau_q, tau_s = routing_best$tau_s,
+                                      vs = routing_best$vs, loss = routing_best$loss,
+                                      slow_only = TRUE, max_inf = 5000)$Q_tot
+routing_split <- tibble::tibble(
+  period = c("First half", "Second half"),
+  start = purrr::map_chr(routing_halves[c("TRUE", "FALSE")], ~ as.character(min(routing_input$date[.x]))),
+  end   = purrr::map_chr(routing_halves[c("TRUE", "FALSE")], ~ as.character(max(routing_input$date[.x]))),
+  nse   = purrr::map_dbl(routing_halves[c("TRUE", "FALSE")],
+                         ~ NSE(obs = routing_input$discharge_m3s[.x], sim = routing_best_sim[.x])))
+routing_split
+
+readr::write_csv(dplyr::bind_rows(routing_fits %>% dplyr::mutate(step = "optim"),
+                                  routing_random %>% dplyr::slice_head(n = 20) %>%
+                                    dplyr::mutate(step = "random (top 20)")),
+                 "data/park/MORA/Tables/nisqually_routing_optim.csv")
+
+# Run routing model with the optimized parameters (full record for warm-up,
+# then kept to the calibration dates)
+routing <-  runoff_routing_gw(df = routing_input,
                                  runoff_col = "runoff_m3s",
                                  date_col = "date",
-                                 tau_q = 3, 
-                                 tau_s = 100, 
-                                 vs = .34,
-                                 loss = 0,
+                                 tau_q = routing_best$tau_q,
+                                 tau_s = routing_best$tau_s,
+                                 vs = routing_best$vs,
+                                 loss = routing_best$loss,
                                  baseflow = 0,
                                  delay = 0,
                                  slow_only = TRUE,
                                  return_components = TRUE,
                                  max_inf = 5000) %>%
-  left_join(cal_dat, by = "date")
+  dplyr::inner_join(cal_dat, by = "date")
 
 
 # 1. Define named color palette & linetypes for reliable mapping
@@ -3094,8 +3184,10 @@ p <- ggplot() +
     plot.subtitle = element_text(color = "grey30", size = 11)
   )
 
-p + scale_y_log10(labels = comma) + 
+p <- p + scale_y_log10(labels = comma) + 
   labs(y = expression("Log Discharge ("*m^3*"/s)"))
+
+p
 
 
 # Facet plot by year
@@ -3121,11 +3213,14 @@ combined_wide <- routing %>%
     by = "date"
   ) %>%
   mutate(year = year(date)) %>%
-  drop_na(`Modeled VIC`, Observed, `Modeled WBM`) %>%
+  drop_na(`Modeled VIC`, Observed, `Modeled WBM`) # %>%
+#  dplyr::filter(year(date) < 2009 & year(date) > 2000)
+
+combined_wide_fig <- combined_wide  %>%
   dplyr::filter(year(date) < 2009 & year(date) > 2000)
 
 # 3. Plot using the wide dataset and facet by year
-p <- ggplot(combined_wide, aes(x = date)) +
+p <- ggplot(combined_wide_fig, aes(x = date)) +
   # Map each column individually from the wide dataframe
   geom_line(aes(y = Observed, color = "Observed", linetype = "Observed"), linewidth = 1) +
   geom_line(aes(y = `Modeled WBM`, color = "Modeled WBM", linetype = "Modeled WBM"), linewidth = 0.5, alpha = 0.85) +
@@ -3161,6 +3256,9 @@ p <- ggplot(combined_wide, aes(x = date)) +
 
 p
 
+ggsave("data/park/MORA/Figs/vic_comparison_nisqually.png", dpi = 600,
+       width = 7, height = 7)
+
 nse_wbm <- NSE(obs = combined_wide$Observed, 
                sim = combined_wide$`Modeled WBM`)
 
@@ -3185,6 +3283,24 @@ fit_stats <- fit_stats %>%
               as.character(min(combined_wide$date)), as.character(max(combined_wide$date)),
               nrow(combined_wide))))
 print(fit_stats)
+
+# Volume bias by calendar month and overall (percent difference of the
+# modeled mean from the observed mean). Late-summer shortfalls in the WBM
+# are expected where glacier melt, which the WBM does not simulate,
+# sustains observed flow.
+routing_bias <- combined_wide %>%
+  dplyr::mutate(month = lubridate::month(date)) %>%
+  dplyr::group_by(month) %>%
+  dplyr::summarize(dplyr::across(c(Observed, `Modeled WBM`, `Modeled VIC`), mean), .groups = "drop") %>%
+  dplyr::mutate(month = as.character(month)) %>%
+  dplyr::bind_rows(combined_wide %>%
+                     dplyr::summarize(dplyr::across(c(Observed, `Modeled WBM`, `Modeled VIC`), mean)) %>%
+                     dplyr::mutate(month = "All")) %>%
+  dplyr::mutate(bias_wbm_pct = 100 * (`Modeled WBM` - Observed) / Observed,
+                bias_vic_pct = 100 * (`Modeled VIC` - Observed) / Observed)
+routing_bias
+
+readr::write_csv(routing_bias, "data/park/MORA/Tables/nisqually_routing_bias.csv")
 
 
 ggplot(combined_wide, aes(x = Observed)) +
@@ -3253,6 +3369,9 @@ site_fig_point <- current_system %>%
   dplyr::select(label)
 
 # Workspace cleanup: these are no longer used after this point.
+rm(routing_bounds, routing_n_random, routing_n_starts, routing_input, routing_cal_idx,
+   routing_nse, free_par, fixed_par, full_par, routing_random, routing_fits,
+   routing_halves, routing_best_sim, routing_split, routing_bias)
 rm(aoi_gridmet_basin, basin_area, basin_wbm, cal_dat, clim_basin, clim_pts_basin, combined_wide,  hydro_colors, hydro_lines, mod_dat, model, p, routing, scale_factor, usgs_discharge_bf, vic_dat)
 gc()
 ```
