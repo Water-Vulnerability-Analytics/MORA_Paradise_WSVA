@@ -3971,10 +3971,47 @@ ncol = 1, align = "hv")
 
 ggsave("data/park/MORA/Figs/observed_water_use.jpg", dpi = 600, width = 7, height = 5)
 
+
+
+# Workspace cleanup
+rm(daily_monthly_agg)
+gc()
+
+
+
+# Observed daily use, summarized here because wateruse_daily is removed below
+# (used in the water use summary table). Days with zero or missing use are
+# treated as unmetered.
+observed_daily_summary <- wateruse_daily %>%
+  dplyr::filter(!is.na(use_gal), use_gal > 0) %>%
+  dplyr::summarize(first_date = min(date),
+                   last_date = max(date),
+                   n_days = dplyr::n(),
+                   mean_daily_gal = mean(use_gal),
+                   max_daily_gal = max(use_gal),
+                   max_daily_date = date[which.max(use_gal)])
+
+# Peak-day to average-day ratio within each well-metered month (>= 25 days),
+# a check on the assumption that peak daily use is about twice the average
+# daily use for the month
+daily_peak_ratio <- wateruse_daily %>%
+  dplyr::filter(!is.na(use_gal), use_gal > 0) %>%
+  dplyr::mutate(ym = floor_date(date, "month")) %>%
+  dplyr::group_by(ym) %>%
+  dplyr::filter(dplyr::n() >= 25) %>%
+  dplyr::summarize(mean_daily_gal = mean(use_gal),
+                   max_daily_gal = max(use_gal),
+                   peak_ratio = max_daily_gal / mean_daily_gal,
+                   .groups = "drop")
+
+print(observed_daily_summary)
+print(summary(daily_peak_ratio$peak_ratio))
+
 # Workspace cleanup: these are no longer used after this point.
 rm(daily_monthly_agg, wateruse_daily)
 gc()
 ```
+
 
 ## - Turbidity and precipitation
 
@@ -4670,6 +4707,20 @@ ggplot(vis_clim_use %>%
 
 
 
+# Observed monthly use, summarized here because wateruse_monthly is removed
+# below (used in the water use summary table). June 2017 is excluded as in
+# the leak analysis above.
+observed_monthly_summary <- wateruse_monthly %>%
+  dplyr::filter(!is.na(total_use), ym != as.Date("2017-06-01")) %>%
+  dplyr::summarize(first_month = min(ym),
+                   last_month = max(ym),
+                   n_months = dplyr::n(),
+                   mean_monthly_gal = mean(total_use),
+                   max_monthly_gal = max(total_use),
+                   max_month = ym[which.max(total_use)])
+
+print(observed_monthly_summary)
+
 # Workspace cleanup: these are no longer used after this point.
 rm(wateruse_monthly)
 gc()
@@ -4874,6 +4925,102 @@ ds_annual <- ds_monthly %>%
   )
 
 print(ds_annual)
+
+# --- 6. Demand vs. routed streamflow ----------------------------------------
+
+# The runoff-based supply above is the water generated within each month,
+# which understates late-summer supply: much of that month's streamflow is
+# earlier runoff draining through the routing stores. Here supply is routed
+# streamflow from the 1,000-member routing ensemble (daily min/mean/max, in
+# gal/day), summed to monthly volumes for each year. Two sources of spread
+# are kept separate:
+#   - routing parameter uncertainty: ensemble mean vs. ensemble minimum
+#   - year-to-year variability: median year vs. a dry year (10th percentile
+#     of the years in the window, by calendar month)
+flow_monthly <- wbm %>%
+  dplyr::mutate(year = year(date), month = month(date)) %>%
+  dplyr::filter((CF == "Historical" & year >= hist_yrs[1] & year <= hist_yrs[2]) |
+                (CF != "Historical" & year >= fut_yrs[1]  & year <= fut_yrs[2])) %>%
+  dplyr::group_by(CF, year, month) %>%
+  dplyr::summarize(`Edith Current_mean`    = sum(mean_edith_discharge),
+                   `Edith Current_min`     = sum(min_edith_discharge),
+                   `Edith Downstream_mean` = sum(mean_down_edith_discharge),
+                   `Edith Downstream_min`  = sum(min_down_edith_discharge),
+                   `Paradise GW_mean`      = sum(mean_paradise_discharge),
+                   `Paradise GW_min`       = sum(min_paradise_discharge),
+                   .groups = "drop") %>%
+  tidyr::pivot_longer(-c(CF, year, month), names_to = c("system", "ensemble"),
+                      names_sep = "_", values_to = "flow_gal")
+
+flow_month_stats <- flow_monthly %>%
+  dplyr::group_by(CF, system, month) %>%
+  dplyr::summarize(flow_median_year_gal = median(flow_gal[ensemble == "mean"]),
+                   flow_dry_year_gal = quantile(flow_gal[ensemble == "mean"], 0.1),
+                   flow_dry_year_min_gal = quantile(flow_gal[ensemble == "min"], 0.1),
+                   .groups = "drop")
+
+ds_streamflow_monthly <- demand_monthly %>%
+  dplyr::left_join(scenario_cf_lookup, by = "scenario", relationship = "many-to-many") %>%
+  dplyr::left_join(flow_month_stats, by = c("CF", "month"), relationship = "many-to-many") %>%
+  dplyr::mutate(DS_typical = demand_gal_mid / flow_median_year_gal,
+                DS_dry_year = demand_gal_mid / flow_dry_year_gal,
+                DS_stress_test = demand_gal_high / flow_dry_year_min_gal) %>%
+  dplyr::arrange(system, scenario, CF, month)
+
+readr::write_csv(ds_streamflow_monthly, "data/park/MORA/Tables/ds_streamflow_monthly.csv")
+
+# Highest monthly D:S for each case, by system and scenario
+ds_streamflow_peak <- ds_streamflow_monthly %>%
+  dplyr::group_by(system, scenario, CF) %>%
+  dplyr::summarize(typical_max_DS = max(DS_typical),
+                   typical_month = month.abb[month[which.max(DS_typical)]],
+                   dry_year_max_DS = max(DS_dry_year),
+                   dry_year_month = month.abb[month[which.max(DS_dry_year)]],
+                   stress_test_max_DS = max(DS_stress_test),
+                   stress_test_month = month.abb[month[which.max(DS_stress_test)]],
+                   .groups = "drop")
+
+print(ds_streamflow_peak, width = Inf)
+readr::write_csv(ds_streamflow_peak, "data/park/MORA/Tables/ds_streamflow_peak.csv")
+
+# Figure (Appendix A7): monthly demand vs. routed streamflow cases, by system,
+# for the historical post-leak scenario and the projected scenario under each
+# climate future
+ds_flow_plot_dat <- ds_streamflow_monthly %>%
+  dplyr::filter(scenario != "Pre-Leak (Historical)") %>%
+  dplyr::mutate(panel = ifelse(CF == "Historical", "Historical (post-leak demand)",
+                               paste0("Projected, ", CF)),
+                panel = factor(panel, levels = c("Historical (post-leak demand)",
+                                                 "Projected, Less Snowy Dry", "Projected, Snowy Wet")),
+                month_date = as.Date(paste0("2021-", month, "-01")))
+
+ds_flow_fig <- ggplot(ds_flow_plot_dat, aes(x = month_date)) +
+  geom_ribbon(aes(ymin = flow_dry_year_min_gal / 1e6, ymax = flow_median_year_gal / 1e6),
+              fill = "#1b6ca8", alpha = 0.15) +
+  geom_line(aes(y = flow_median_year_gal / 1e6, linetype = "Streamflow, typical year"), color = "#1b6ca8") +
+  geom_line(aes(y = flow_dry_year_gal / 1e6, linetype = "Streamflow, dry year"), color = "#1b6ca8") +
+  geom_line(aes(y = flow_dry_year_min_gal / 1e6, linetype = "Streamflow, stress test"), color = "#1b6ca8") +
+  geom_line(aes(y = demand_gal_mid / 1e6, color = "Demand, mid"), linewidth = 0.9) +
+  geom_line(aes(y = demand_gal_high / 1e6, color = "Demand, high"), linewidth = 0.9) +
+  scale_y_log10(labels = scales::label_number(accuracy = 0.1)) +
+  scale_color_manual("", values = c("Demand, mid" = "black", "Demand, high" = "#b02a24")) +
+  scale_linetype_manual("", values = c("Streamflow, typical year" = "solid",
+                                       "Streamflow, dry year" = "dashed",
+                                       "Streamflow, stress test" = "dotted")) +
+  scale_x_date(date_labels = "%b", date_breaks = "2 months") +
+  facet_grid(system ~ panel) +
+  labs(x = NULL, y = "Monthly volume (Mgal, log scale)") +
+  theme_wsva() +
+  theme(legend.position = "bottom", legend.box = "vertical")
+
+ds_flow_fig
+
+ggsave(ds_flow_fig, filename = "data/park/MORA/Figs/ds_streamflow_fig.jpg",
+       dpi = 600, width = 9, height = 8)
+
+rm(ds_flow_plot_dat)
+
+rm(flow_monthly)
 
 ```
 
@@ -5829,6 +5976,81 @@ gc()
 
 ```
 
+# 7c. Snow persistence from the WBM
+
+Satellite snow persistence (Hammond et al., 2018) is the fraction of January 1
+to July 3 with snow cover. The same quantity is computed here from the WBM's
+daily snowpack for the selected grid cells: the fraction of January 1 to July 3
+days with any modeled snowpack. This extends the record back to 1980 and into
+both climate futures, at the cost of representing the two-cell average rather
+than individual catchments (all three candidate systems share it).
+
+```{r wbm_snow_persistence}
+
+wbm_sp_annual <- wbm %>%
+  dplyr::mutate(year = year(date), doy = yday(date)) %>%
+  dplyr::filter(doy <= 184) %>%                       # Jan 1 - Jul 3
+  dplyr::group_by(CF, year) %>%
+  dplyr::filter(dplyr::n() >= 180) %>%                # complete seasons only
+  dplyr::summarize(wbm_sp = 100 * mean(snowpack_in_wbm > 0), .groups = "drop")
+
+sp_trend_test <- function(d, label) {
+  d <- dplyr::arrange(d, year)
+  tibble::tibble(period = label, first_year = min(d$year), last_year = max(d$year),
+                 n_years = nrow(d), mean_sp = mean(d$wbm_sp),
+                 sens_slope_per_yr = as.numeric(trend::sens.slope(d$wbm_sp)$estimates),
+                 mk_p_value = trend::mk.test(d$wbm_sp)$p.value)
+}
+
+wbm_sp_hist <- dplyr::filter(wbm_sp_annual, CF == "Historical")
+
+wbm_sp_trend <- dplyr::bind_rows(
+  sp_trend_test(dplyr::filter(wbm_sp_hist, year >= hist_yrs[1], year <= hist_yrs[2]), "Historical baseline"),
+  sp_trend_test(dplyr::filter(wbm_sp_hist, year >= 2001), "Satellite overlap (2001 onward)"),
+  sp_trend_test(dplyr::filter(wbm_sp_hist, year >= hist_yrs[1]), "Full historical record"))
+
+wbm_sp_change <- wbm_sp_annual %>%
+  dplyr::filter((CF == "Historical" & year >= hist_yrs[1] & year <= hist_yrs[2]) |
+                (CF != "Historical" & year >= fut_yrs[1] & year <= fut_yrs[2])) %>%
+  dplyr::group_by(CF) %>%
+  dplyr::summarize(mean_sp = mean(wbm_sp), min_sp = min(wbm_sp), max_sp = max(wbm_sp), .groups = "drop") %>%
+  dplyr::mutate(change_pct_points = mean_sp - mean_sp[CF == "Historical"])
+
+# Agreement with satellite snow persistence over the overlapping years
+# (sp_system_ts, from the sp_trend_by_system chunk)
+wbm_sat_sp <- wbm_sp_hist %>%
+  dplyr::inner_join(sp_system_ts %>% dplyr::filter(system == "Edith Current") %>%
+                      dplyr::select(year, satellite_sp = mean_sp), by = "year")
+wbm_sat_cor <- cor(wbm_sat_sp$wbm_sp, wbm_sat_sp$satellite_sp)
+
+print(wbm_sp_trend)
+print(wbm_sp_change)
+cat("WBM vs satellite snow persistence (Edith Current), r =", round(wbm_sat_cor, 2),
+    "over", nrow(wbm_sat_sp), "years\n")
+
+readr::write_csv(dplyr::bind_rows(wbm_sp_trend %>% dplyr::mutate(table = "trend"),
+                                  wbm_sp_change %>% dplyr::mutate(table = "change")),
+                 "data/park/MORA/Tables/wbm_snow_persistence.csv")
+
+wbm_sp_fig <- ggplot(wbm_sp_annual %>% dplyr::filter(year >= hist_yrs[1]),
+                     aes(x = year, y = wbm_sp, color = CF)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(data = sp_system_ts %>% dplyr::filter(system == "Edith Current"),
+             aes(x = year, y = mean_sp, color = "Satellite (Edith Current)"), inherit.aes = FALSE, size = 1.8) +
+  scale_color_manual("", values = c(plot_colors, "Satellite (Edith Current)" = "black")) +
+  labs(x = NULL, y = "Snow persistence, Jan 1 - Jul 3 (%)") +
+  theme_wsva()
+
+wbm_sp_fig
+
+ggsave(wbm_sp_fig, filename = "data/park/MORA/Figs/wbm_snow_persistence.jpg",
+       dpi = 600, width = 7, height = 4)
+
+rm(sp_trend_test, wbm_sp_hist, wbm_sat_sp)
+
+```
+
+
 # 8. Cold days
 
 Look at cold days (min annual temp) for past and clim futures
@@ -6676,10 +6898,178 @@ observed_annual_summary <- wateruse_annual %>%
     max_use_mgal  = max(total_use, na.rm = TRUE) / 1e6
   )
 
+# Modeled monthly use: mean monthly use and the peak month of the mean
+# monthly climatology, historical vs. projected (mid and high rates)
+modeled_monthly_summary <- monthly_use %>%
+  dplyr::filter(group %in% c("Historical", "Projected"), !is.na(mid_use)) %>%
+  dplyr::mutate(month = month(ym)) %>%
+  dplyr::group_by(group, month) %>%
+  dplyr::summarize(mid_use = mean(mid_use), high_use = mean(high_use), .groups = "drop") %>%
+  dplyr::group_by(group) %>%
+  dplyr::summarize(mean_monthly_gal = mean(mid_use),
+                   peak_month = month.abb[month[which.max(mid_use)]],
+                   peak_month_mid_gal = max(mid_use),
+                   peak_month_high_gal = high_use[which.max(mid_use)],
+                   peak_month_days = lubridate::days_in_month(as.Date(paste0("2021-", month[which.max(mid_use)], "-01"))),
+                   .groups = "drop")
+
+# Potential maximum daily use: twice the average daily use of the peak month
+peak_factor <- 2
+
+water_use_summary <- tibble::tribble(
+  ~metric, ~observed, ~modeled_historical, ~modeled_projected,
+  "Daily use, mean (gal/day)",
+    observed_daily_summary$mean_daily_gal, NA, NA,
+  "Daily use, maximum (gal/day)",
+    observed_daily_summary$max_daily_gal, NA, NA,
+  "Monthly use, mean (Mgal/month)",
+    observed_monthly_summary$mean_monthly_gal / 1e6,
+    modeled_monthly_summary$mean_monthly_gal[modeled_monthly_summary$group == "Historical"] / 1e6,
+    modeled_monthly_summary$mean_monthly_gal[modeled_monthly_summary$group == "Projected"] / 1e6,
+  "Monthly use, peak month (Mgal/month)",
+    observed_monthly_summary$max_monthly_gal / 1e6,
+    modeled_monthly_summary$peak_month_mid_gal[modeled_monthly_summary$group == "Historical"] / 1e6,
+    modeled_monthly_summary$peak_month_mid_gal[modeled_monthly_summary$group == "Projected"] / 1e6,
+  "Annual use, mean (Mgal/yr)",
+    observed_annual_summary$mean_use_mgal,
+    demand_summary$mean_demand_mgal[demand_summary$group == "Historical"],
+    demand_summary$mean_demand_mgal[demand_summary$group == "Projected"],
+  "Potential maximum daily use, mid rate (gal/day)",
+    peak_factor * observed_monthly_summary$max_monthly_gal /
+      lubridate::days_in_month(observed_monthly_summary$max_month),
+    with(dplyr::filter(modeled_monthly_summary, group == "Historical"), peak_factor * peak_month_mid_gal / peak_month_days),
+    with(dplyr::filter(modeled_monthly_summary, group == "Projected"), peak_factor * peak_month_mid_gal / peak_month_days),
+  "Potential maximum daily use, high rate (gal/day)",
+    NA,
+    with(dplyr::filter(modeled_monthly_summary, group == "Historical"), peak_factor * peak_month_high_gal / peak_month_days),
+    with(dplyr::filter(modeled_monthly_summary, group == "Projected"), peak_factor * peak_month_high_gal / peak_month_days)
+)
+
 print(visitation_summary)
 print(demand_summary)
 print(observed_annual_summary)
 print(use_per_visitor)
+print(modeled_monthly_summary)
+print(water_use_summary)
+readr::write_csv(water_use_summary, "data/park/MORA/Tables/water_use_summary.csv")
+
+```
+
+Treatment capacity, filter loading, and share of Edith Creek baseflow. The
+treatment system is rated at 100 gpm on the Washington State Department of
+Health facilities form, but staff report an operating maximum closer to 80 gpm,
+and the plant runs up to 15 hours per day. These calculations compare daily
+demand with what the plant can treat, estimate how filter loading scales with
+the volume treated, and express withdrawals as a share of Edith Creek baseflow
+(about 1 cfs, measured September 3, 2026, near the annual low flow).
+
+```{r treatment_capacity_and_baseflow}
+
+cfs_to_gpm <- 7.48052 * 60   # gpm per cfs
+
+# --- 1. Daily treatment capacity vs. daily demand ---------------------------
+
+treatment_capacity <- tidyr::crossing(rate_gpm = c(80, 100), hours_per_day = c(15, 24)) %>%
+  dplyr::mutate(capacity_gal_day = rate_gpm * hours_per_day * 60)
+
+mm <- function(grp, col) {
+  r <- dplyr::filter(modeled_monthly_summary, group == grp)
+  r[[col]] / r$peak_month_days
+}
+
+daily_demand_cases <- tibble::tribble(
+  ~case,                                          ~gal_day,
+  "Observed: highest metered day",                observed_daily_summary$max_daily_gal,
+  "Modeled historical: peak-month average day",   mm("Historical", "peak_month_mid_gal"),
+  "Modeled historical: potential max day, mid",   peak_factor * mm("Historical", "peak_month_mid_gal"),
+  "Modeled historical: potential max day, high",  peak_factor * mm("Historical", "peak_month_high_gal"),
+  "Projected: peak-month average day, mid",       mm("Projected", "peak_month_mid_gal"),
+  "Projected: peak-month average day, high",      mm("Projected", "peak_month_high_gal"),
+  "Projected: potential max day, mid",            peak_factor * mm("Projected", "peak_month_mid_gal"),
+  "Projected: potential max day, high",           peak_factor * mm("Projected", "peak_month_high_gal")
+) %>%
+  dplyr::mutate(required_gpm_15h = gal_day / (15 * 60),
+                required_gpm_24h = gal_day / (24 * 60),
+                exceeds_80gpm_15h = gal_day > 80 * 15 * 60,
+                exceeds_80gpm_24h = gal_day > 80 * 24 * 60,
+                exceeds_100gpm_15h = gal_day > 100 * 15 * 60,
+                exceeds_100gpm_24h = gal_day > 100 * 24 * 60)
+
+print(treatment_capacity)
+print(daily_demand_cases, width = Inf)
+readr::write_csv(daily_demand_cases, "data/park/MORA/Tables/treatment_capacity_vs_demand.csv")
+
+# --- 2. Filter loading: volume treated relative to current operation --------
+
+# With the same sediment concentration, filter loading (and so the frequency
+# of filter changes) scales with the volume of water treated. Current
+# operation is the post-leak period; pre-leak is shown for comparison.
+leak_climatology <- monthly_leak_summary %>%
+  dplyr::group_by(period) %>%
+  dplyr::summarize(annual_gal = sum(avg_use), aug_gal = avg_use[m_num == 8], .groups = "drop")
+
+post <- dplyr::filter(leak_climatology, grepl("Post", period))
+pre  <- dplyr::filter(leak_climatology, grepl("Pre", period))
+proj <- dplyr::filter(modeled_monthly_summary, group == "Projected")
+proj_annual_mid  <- demand_summary$mean_demand_mgal[demand_summary$group == "Projected"] * 1e6
+proj_annual_high <- demand_summary$high_demand_mgal[demand_summary$group == "Projected"] * 1e6
+
+filter_loading <- tibble::tribble(
+  ~case,                         ~annual_gal,       ~aug_gal,
+  "Pre-leak (observed)",         pre$annual_gal,    pre$aug_gal,
+  "Post-leak, current (observed)", post$annual_gal, post$aug_gal,
+  "Projected, mid rate",         proj_annual_mid,   proj$peak_month_mid_gal,
+  "Projected, high rate",        proj_annual_high,  proj$peak_month_high_gal
+) %>%
+  dplyr::mutate(annual_vs_current = annual_gal / post$annual_gal,
+                aug_vs_current = aug_gal / post$aug_gal,
+                annual_vs_preleak = annual_gal / pre$annual_gal,
+                aug_vs_preleak = aug_gal / pre$aug_gal)
+
+print(filter_loading, width = Inf)
+readr::write_csv(filter_loading, "data/park/MORA/Tables/filter_loading.csv")
+
+# --- 3. Share of Edith Creek baseflow ---------------------------------------
+
+measured_baseflow_cfs <- 1.0   # field measurement, September 3, 2026
+
+# Future baseflow: scale the measurement by the modeled change in Edith
+# Current's late-summer low flow, the lowest point of the mean July-October
+# routed hydrograph (routing-ensemble mean, averaged across years)
+late_summer_low <- wbm %>%
+  dplyr::mutate(year = year(date), doy = yday(date), month = month(date)) %>%
+  dplyr::filter((CF == "Historical" & year >= hist_yrs[1] & year <= hist_yrs[2]) |
+                (CF != "Historical" & year >= fut_yrs[1] & year <= fut_yrs[2]),
+                month %in% 7:10) %>%
+  dplyr::group_by(CF, doy) %>%
+  dplyr::summarize(mean_gpm = mean(mean_edith_discharge) / 1440, .groups = "drop") %>%
+  dplyr::group_by(CF) %>%
+  dplyr::summarize(low_flow_gpm = min(mean_gpm),
+                   low_flow_date = format(as.Date(doy[which.min(mean_gpm)] - 1, origin = "2021-01-01"), "%b %d"),
+                   .groups = "drop") %>%
+  dplyr::mutate(ratio_to_historical = low_flow_gpm / low_flow_gpm[CF == "Historical"],
+                baseflow_cfs = measured_baseflow_cfs * ratio_to_historical,
+                baseflow_gpm = baseflow_cfs * cfs_to_gpm)
+
+withdrawal_cases <- tibble::tribble(
+  ~withdrawal,                                      ~gpm,
+  "Intake at operating maximum (80 gpm)",           80,
+  "Intake at rated capacity (100 gpm)",             100,
+  "Observed highest metered day (daily average)",   observed_daily_summary$max_daily_gal / 1440,
+  "Projected potential max day, mid (daily average)",  peak_factor * mm("Projected", "peak_month_mid_gal") / 1440,
+  "Projected potential max day, high (daily average)", peak_factor * mm("Projected", "peak_month_high_gal") / 1440
+)
+
+baseflow_share <- tidyr::crossing(late_summer_low %>% dplyr::select(CF, baseflow_cfs, baseflow_gpm),
+                                  withdrawal_cases) %>%
+  dplyr::mutate(pct_of_baseflow = 100 * gpm / baseflow_gpm)
+
+print(late_summer_low)
+print(baseflow_share, n = Inf)
+readr::write_csv(late_summer_low, "data/park/MORA/Tables/edith_late_summer_low_flow.csv")
+readr::write_csv(baseflow_share, "data/park/MORA/Tables/edith_baseflow_share.csv")
+
+rm(mm, post, pre, proj, proj_annual_mid, proj_annual_high)
 
 ```
 
