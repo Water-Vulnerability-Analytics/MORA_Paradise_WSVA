@@ -6633,6 +6633,51 @@ geo_fig_fault_labels <- geo_fig_faults %>%
   dplyr::summarize(.groups = "drop") %>%
   sf::st_point_on_surface()
 
+# Share of each candidate watershed in each practical geology group, computed
+# in the equal-area analysis CRS (Web Mercator areas are inflated at this
+# latitude). Used for the brief geology description in Appendix A.
+geology_by_system <- purrr::imap_dfr(
+  list(Bedrock = bedrock_fig_geo, Surficial = surficial_fig_geo),
+  function(geo, layer) {
+    sf::st_intersection(sf::st_transform(site_fig_watersheds, crs_use),
+                        sf::st_transform(geo, crs_use)) %>%
+      dplyr::mutate(area_km2 = as.numeric(sf::st_area(.)) / 1e6) %>%
+      sf::st_drop_geometry() %>%
+      dplyr::group_by(system) %>%
+      dplyr::mutate(pct = 100 * area_km2 / sum(area_km2)) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(layer = layer, geo_group = as.character(geo_group))
+  }) %>%
+  dplyr::select(layer, system, geo_group, area_km2, pct) %>%
+  dplyr::arrange(layer, system, dplyr::desc(pct))
+
+geology_by_system
+
+readr::write_csv(geology_by_system, "data/park/MORA/Tables/geology_by_system.csv")
+
+# Distance from the current intake and each candidate watershed to the
+# nearest mapped fault segment (full layer, not just the figure extent).
+geo_faults_all <- sf::st_read("data/park/MORA/mora_geology_gpkg/mora_geology.gpkg",
+                              layer = "MORA_Faults", quiet = TRUE) %>%
+  janitor::clean_names() %>%
+  sf::st_transform(crs_use) %>%
+  dplyr::group_by(feature_name) %>%
+  dplyr::summarize(.groups = "drop")
+
+fault_distance <- tidyr::expand_grid(
+  feature_name = geo_faults_all$feature_name,
+  location     = c("Current intake", site_fig_watersheds$system)) %>%
+  dplyr::mutate(distance_km = purrr::map2_dbl(feature_name, location, function(f, l) {
+    target <- if (l == "Current intake") current_system else
+      dplyr::filter(site_fig_watersheds, system == l)
+    as.numeric(sf::st_distance(dplyr::filter(geo_faults_all, feature_name == f),
+                               sf::st_transform(target, crs_use))[1, 1]) / 1000
+  }))
+
+fault_distance
+
+readr::write_csv(fault_distance, "data/park/MORA/Tables/fault_distance.csv")
+
 # --- 3. Basemap and panels --------------------------------------------------
 geo_tiles <- get_nps_basemap(aoi = sf::st_as_sfc(geo_fig_bbox), style = "standard",
                              buffer_km = 0.5, zoom = 13)
@@ -6688,7 +6733,8 @@ ggsave(geology_fig, filename = "data/park/MORA/Figs/geology_fig.jpg",
 # Workspace cleanup: these are no longer used after this point.
 rm(bedrock_groups, surficial_groups, bedrock_colors, surficial_colors, geo_fig_bbox,
    dissolve_geo, bedrock_fig_geo, surficial_fig_geo, geo_fig_faults,
-   geo_fig_fault_labels, geo_tiles, geo_fig_panel)
+   geo_fig_fault_labels, geo_tiles, geo_fig_panel, geology_by_system,
+   geo_faults_all, fault_distance)
 gc()
 
 ```
