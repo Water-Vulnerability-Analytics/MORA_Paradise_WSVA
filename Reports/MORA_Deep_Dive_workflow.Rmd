@@ -3303,7 +3303,7 @@ routing_bias
 readr::write_csv(routing_bias, "data/park/MORA/Tables/nisqually_routing_bias.csv")
 
 
-ggplot(combined_wide, aes(x = Observed)) +
+vic_scatter <- ggplot(combined_wide, aes(x = Observed)) +
   # 1:1 Reference Line (Ideal fit)
   geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey40", linewidth = 0.8) +
   # Points
@@ -3338,6 +3338,14 @@ ggplot(combined_wide, aes(x = Observed)) +
     plot.title = element_text(face = "bold", size = 14),
     plot.subtitle = element_text(color = "grey30", size = 11)
   )
+
+vic_scatter
+
+# Hydrographs (2001-2008) above the scatter plot, Appendix B
+ggsave(ggarrange(p, vic_scatter, ncol = 1, heights = c(1.6, 1)),
+       filename = "data/park/MORA/Figs/vic_comparison_nisqually_combined.jpg",
+       width = 7, height = 11, dpi = 400, bg = "white")
+rm(vic_scatter)
 
 
 
@@ -3912,6 +3920,10 @@ ggsave("data/park/MORA/Figs/vis_comp_all.png",
 
 # Model Stats
 gam_r2      <- summary(gam_res$gam_model)$r.sq
+
+# GAM fit diagnostics (observed vs. modeled, residuals, 1:1), Appendix A
+ggsave(gam_res$gam_diagnostics, filename = "data/park/MORA/Figs/gam_fit_fig.jpg",
+       width = 6.5, height = 8, dpi = 600, bg = "white")
 lin_r2      <- summary(lin_res$lm_model)$r.squared
 lin_slope   <- coef(lin_res$lm_model)[["year"]]
 arima_order <- forecast::arimaorder(arima_res$arima_model)
@@ -4652,7 +4664,7 @@ wastewater_max_month <- wastewater_flow$max_month %>% max() * 30.5
 wastewater_avg <- wastewater_flow$avg_day %>% mean() * 30.5
 
 # Plot average monthly profiles with min/max shaded envelope
-ggarrange(
+leak_fig <- ggarrange(
 ggplot(monthly_leak_summary, aes(x = m_num, group = period)) +
   geom_ribbon(aes(ymin = min_use, ymax = max_use, fill = period), alpha = 0.2) +
   geom_line(aes(y = avg_use, color = period), linewidth = 1.2) +
@@ -4714,6 +4726,11 @@ ggplot(monthly_pct_change, aes(x = m_num, y = pct_change)) +
   ),
 ncol = 1, align = "hv")
 
+leak_fig
+ggsave(leak_fig, filename = "data/park/MORA/Figs/leak_monthly_fig.jpg",
+       width = 7, height = 7, dpi = 600, bg = "white")
+rm(leak_fig)
+
 
 # Workspace cleanup: these are no longer used after this point.
 rm(breaks, monthly_pct_change)
@@ -4755,7 +4772,7 @@ use_per_visitor <- vis_clim_use %>%
 print(use_per_visitor)
 
 # Plot use per visitor as scatter / regression
-ggplot(vis_clim_use %>%
+upv_scatter <- ggplot(vis_clim_use %>%
           dplyr::mutate(period = factor(
      if_else(ym < as.Date("2019-06-01"),
             "Pre-June 2019 (Baseline)",
@@ -4792,8 +4809,10 @@ ggplot(vis_clim_use %>%
   )
 
 
+upv_scatter
+
 # Plot use per visitor as box and whisker
-ggplot(vis_clim_use %>%
+upv_box <- ggplot(vis_clim_use %>%
   dplyr::filter(!is.na(use_per_visitor),
                 ym != as.Date("2017-06-01")) %>% # Filter outlier as done in previous steps) %>%
    dplyr::mutate(period = factor(
@@ -4830,6 +4849,14 @@ ggplot(vis_clim_use %>%
     plot.title = element_text(face = "bold"),
     axis.text.x = element_text(angle = 0, hjust = 0.5)
   )
+
+upv_box
+
+# Combined use-per-visitor figure, Appendix A
+upv_fig <- ggarrange(upv_scatter, upv_box, ncol = 2, common.legend = TRUE, legend = "bottom")
+ggsave(upv_fig, filename = "data/park/MORA/Figs/use_per_visitor_fig.jpg",
+       width = 9, height = 4.5, dpi = 600, bg = "white")
+rm(upv_scatter, upv_box, upv_fig)
 
 
 
@@ -5502,6 +5529,24 @@ fpr
 
 ggsave("data/park/MORA/Figs/fire_prob_runoff_corr_fig.jpg", plot = fpr,
        dpi = 600, height = 5, width = 8, units = "in")
+
+# Linear fit of change in fire probability on projected mean annual runoff
+# across GCMs (the line in the figure), reported in Appendix A
+fire_runoff_lm <- lm(delta_fp ~ mean_runoff_in, data = all_delta_fireprob)
+fire_runoff_fit <- tibble::tibble(
+  n_projections = nrow(stats::na.omit(all_delta_fireprob[, c("delta_fp", "mean_runoff_in")])),
+  slope_pct_per_in = coef(fire_runoff_lm)[["mean_runoff_in"]],
+  r2 = summary(fire_runoff_lm)$r.squared,
+  p_value = summary(fire_runoff_lm)$coefficients["mean_runoff_in", "Pr(>|t|)"],
+  spearman_rho = stats::cor(all_delta_fireprob$delta_fp, all_delta_fireprob$mean_runoff_in,
+                            method = "spearman", use = "complete.obs"),
+  delta_fp_min = min(all_delta_fireprob$delta_fp, na.rm = TRUE),
+  delta_fp_max = max(all_delta_fireprob$delta_fp, na.rm = TRUE))
+fire_runoff_fit
+delta_fireprob %>% dplyr::select(GCM, CF, mean_runoff_in, delta_fp)
+
+readr::write_csv(fire_runoff_fit, "data/park/MORA/Tables/fire_prob_runoff_fit.csv")
+rm(fire_runoff_lm)
 
 ```
 
@@ -7427,7 +7472,7 @@ readr::write_csv(filter_loading, "data/park/MORA/Tables/filter_loading.csv")
 
 # --- 3. Share of Edith Creek baseflow ---------------------------------------
 
-measured_baseflow_cfs <- 1.0   # field measurement, September 3, 2026
+measured_baseflow_cfs <- 0.85  # official field measurement, September 3, 2026
 
 # Future baseflow: scale the measurement by the modeled change in Edith
 # Current's late-summer low flow, the lowest point of the mean July-October
@@ -8263,6 +8308,21 @@ forest_cover_fig <-
 forest_cover_fig
 
 ggsave("data/park/MORA/Figs/forest_fig.jpg", forest_cover_fig, width = 8, height = 2.65, dpi = 600)
+
+# Combined land cover (left) and WHP (right) map for the main-text Fire
+# section, with both legends outside the map panels so they don't cover
+# the catchments.
+legend_right <- theme(legend.position = "right",
+                      legend.justification = "center",
+                      legend.key.size = unit(0.35, "cm"),
+                      legend.text = element_text(size = 7),
+                      legend.title = element_text(size = 8))
+landcover_whp_fig <- ggarrange(forest_cover_fig + legend_right,
+                               whp_fig + legend_right,
+                               ncol = 2, labels = c("a", "b"))
+ggsave("data/park/MORA/Figs/landcover_whp_fig.jpg", landcover_whp_fig,
+       width = 10, height = 4.5, dpi = 500, bg = "white")
+rm(legend_right, landcover_whp_fig)
 
 ```
 ### Historic Fires
