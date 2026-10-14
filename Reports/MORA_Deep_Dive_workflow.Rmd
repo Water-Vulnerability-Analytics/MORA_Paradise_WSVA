@@ -3734,8 +3734,8 @@ fig_comparison_annual <- ggplot(all_results, aes(x = year)) +
   scale_fill_manual(values = method_colors, guide = "none") +
   scale_color_manual(values = method_colors, guide = "none") +
   scale_y_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
-  labs(x = "Year", y = "Annual Visitors",
-       title = "Comparison of Visitation Projection Methods: Paradise") +
+  labs(x = "", y = "Annual Visitors") +
+#       title = "Comparison of Visitation Projection Methods: Paradise") +
   theme_bw(base_size = 11) +
   theme(strip.background = element_rect(fill = "grey90"),
         panel.grid.minor = element_blank(),
@@ -3746,7 +3746,7 @@ print(fig_comparison_annual)
 # Also save a standalone copy of the figure into this same folder, in case
 # it's needed outside of the knit Word document (e.g. embedded elsewhere).
 ggsave("data/park/MORA/Figs/vis_method_comparison_figure.png", 
-       fig_comparison_annual, width = 7, height = 6, dpi = 600)
+       fig_comparison_annual, width = 7, height = 4, dpi = 600)
 
 
 # Monthly Plot Models
@@ -3768,8 +3768,8 @@ fig_comparison_monthly <- ggplot(all_results_monthly, aes(x = ym)) +
   scale_fill_manual(values = method_colors, guide = "none") +
   scale_color_manual(values = method_colors, guide = "none") +
   scale_y_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
-  labs(x = "Date", y = "Monthly Visitors",
-       title = "Comparison of Visitation Projection Methods: Paradise") +
+  labs(x = "", y = "Monthly Visitors") +
+#       title = "Comparison of Visitation Projection Methods: Paradise") +
   theme_bw(base_size = 11) +
   theme(strip.background = element_rect(fill = "grey90"),
         panel.grid.minor = element_blank(),
@@ -3778,9 +3778,18 @@ fig_comparison_monthly <- ggplot(all_results_monthly, aes(x = ym)) +
 print(fig_comparison_monthly)
 
 ggsave("data/park/MORA/Figs/vis_comparison_figure_monthly.png", 
-       fig_comparison_monthly, width = 7, height = 6, dpi = 600)
+       fig_comparison_monthly, width = 7, height = 4, dpi = 600)
 
+ggarrange(
+  fig_comparison_annual, 
+  fig_comparison_monthly, 
+  ncol = 1, 
+  labels = c("a)", "b)"),
+  font.label = list(size = 10, face = "bold", color = "black")
+)
 
+ggsave("data/park/MORA/Figs/vis_comp_all.png",
+       width = 7, height = 8, dpi = 600)
 
 # Model Stats
 gam_r2      <- summary(gam_res$gam_model)$r.sq
@@ -4815,9 +4824,8 @@ ggplot(monthly_use_proportions %>%
 
 
 
-# Workspace cleanup: these are no longer used after this point.
-rm(observed_monthly_use_proportions)
-gc()
+# observed_monthly_use_proportions is kept for the monthly panel of
+# hf_use_fig (Water Use section) and removed there.
 ```
 
 ## - Supply Calculate monthly supply and demand
@@ -6240,12 +6248,18 @@ diff_plot <- ggplot(future_differentials %>%
   # "Warm"/companion pairing - while fixing the two colors that failed
   # contrast outright (gray80 -> the validated "Other" gray; the pale
   # rosybrown1/#c1dff5 pastels -> readable warm/cool steps).
-  scale_fill_manual("", values = c(nps_pal$red, nps_pal$blue, "black", "#595959", "#b0431f", "#5a9bc4"), na.value="gray85")
+  scale_fill_manual("", values = c("Less Snowy Dry" = nps_pal$red, 
+                                   "Snowy Wet" = nps_pal$blue, 
+                                   "Low Skill" = "black", 
+                                   "Other" = "gray80", 
+                                   "Less Snowy Wet" = "#9fcfe9",
+                                   "Snowy Dry" = "pink3"), 
+                    na.value="gray85")
 
 diff_plot
 
 dir.create("data/park/MORA/Figs", showWarnings = FALSE, recursive = TRUE)
-ggsave("data/park/MORA/Figs/differentials_fig.jpg", diff_plot, width = 7, height = 4, dpi = 600)
+ggsave("data/park/MORA/Figs/differentials_fig.jpg", diff_plot, width = 7, height = 5, dpi = 600)
 
 ```
 
@@ -6473,6 +6487,208 @@ ggsave("data/park/MORA/Figs/site_fig_inset.jpg", inset_fig, width = 2.5, height 
 
 # Workspace cleanup: these are no longer used after this point.
 rm(site_fig_bbox, site_fig_colors, park_centroid)
+gc()
+
+```
+
+##### Geology Figure
+
+Two-panel map of (a) bedrock and (b) surficial geology around Paradise,
+from the NPS Geologic Resources Inventory layers loaded in `## - Geology`
+(bedrock source map USGS I-432; surficial units from the GRI surficial
+geodatabase). Many source unit names are long and the surficial map splits
+glacial drift, mudflows, and slope deposits into many small units, so units
+are grouped under short practical names (lookup tables below, unit symbols
+retained in the code). Grouped polygons are dissolved so the boundaries
+drawn are the major contacts between groups, not every internal contact.
+Mapped faults are from the bedrock layer. The extent is the current
+intake buffered by 6 km, wider than the site figure's 4 km so the nearest
+mapped fault (Stevens Peak Fault) falls inside the frame.
+
+```{r geology_fig}
+
+# --- 1. Practical names for bedrock and surficial units ---------------------
+# Ordered youngest to oldest; factor levels set the legend order.
+bedrock_groups <- tibble::tribble(
+  ~unit_symbol, ~geo_group,
+  "ice",   "Glacier ice",
+  "water", "Water",
+  "Qs",    "Surficial deposits and landslides",
+  "Qls",   "Surficial deposits and landslides",
+  "Qra",   "Mount Rainier volcanic rocks",
+  "Qroa",  "Mount Rainier volcanic rocks",
+  "Qrp",   "Mount Rainier volcanic rocks",
+  "Tha",   "Andesite of Bee Flat",
+  "Tw",    "Welded tuff of The Palisades",
+  "Tg",    "Granodiorite and porphyry intrusions",
+  "Tdi",   "Granodiorite and porphyry intrusions",
+  "Td",    "Diabase and basalt",
+  "Tf",    "Fifes Peak Formation",
+  "Ts",    "Stevens Ridge Formation",
+  "Tar",   "Basaltic andesite and rhyolite",
+  "To",    "Ohanapecosh Formation",
+  "Tol",   "Ohanapecosh Formation",
+  "Tor",   "Ohanapecosh Formation"
+)
+
+surficial_groups <- tibble::tribble(
+  ~unit_symbol, ~geo_group,
+  "ice",   "Glacier ice",
+  "water", "Water",
+  "Qa",    "Alluvium and alluvial cones",
+  "Qac",   "Alluvium and alluvial cones",
+  "Qt",    "Talus and coarse rock debris",
+  "Qbf",   "Talus and coarse rock debris",
+  "Qpt",   "Talus and coarse rock debris",
+  "Qr",    "Talus and coarse rock debris",
+  "Ql",    "Landslide and avalanche deposits",
+  "Qly",   "Landslide and avalanche deposits",
+  "Qav",   "Landslide and avalanche deposits",
+  "Qp",    "Paradise mudflow",
+  "Qv",    "Other mudflows",
+  "Qo",    "Other mudflows",
+  "Qmf",   "Other mudflows",
+  "Qf",    "Other mudflows",
+  "Qfa",   "Other mudflows",
+  "Qfb",   "Other mudflows",
+  "Qfc",   "Other mudflows",
+  "Qfd",   "Other mudflows",
+  "Qg",    "Glacial drift",
+  "Qgy",   "Glacial drift",
+  "Qgo",   "Glacial drift",
+  "Qm",    "Glacial drift",
+  "Qe",    "Glacial drift",
+  "Qh",    "Glacial drift",
+  "Qb",    "Glacial drift",
+  "Qod",   "Glacial drift",
+  "Qra",   "Mount Rainier volcanic rocks",
+  "Tbr",   "Rocks older than Mount Rainier",
+  "Qtr",   "Other",
+  "Qbb",   "Other"
+)
+
+bedrock_colors <- c(
+  "Glacier ice"                          = "white",
+  "Water"                                = "#9ecae1",
+  "Surficial deposits and landslides"    = "#f3e5ab",
+  "Mount Rainier volcanic rocks"         = "#d98880",
+  "Andesite of Bee Flat"                 = "#c39bd3",
+  "Welded tuff of The Palisades"         = "#f0b27a",
+  "Granodiorite and porphyry intrusions" = "#f5b7d4",
+  "Diabase and basalt"                   = "#6c8f3a",
+  "Fifes Peak Formation"                 = "#a9cce3",
+  "Stevens Ridge Formation"              = "#c9a66b",
+  "Basaltic andesite and rhyolite"       = "#a3a3a3",
+  "Ohanapecosh Formation"                = "#82b88a"
+)
+
+surficial_colors <- c(
+  "Glacier ice"                      = "white",
+  "Water"                            = "#9ecae1",
+  "Alluvium and alluvial cones"      = "#fff2a8",
+  "Talus and coarse rock debris"     = "#bdbdbd",
+  "Landslide and avalanche deposits" = "#c7a17a",
+  "Paradise mudflow"                 = "#e59866",
+  "Other mudflows"                   = "#f5cba7",
+  "Glacial drift"                    = "#a2d9ce",
+  "Mount Rainier volcanic rocks"     = "#d98880",
+  "Rocks older than Mount Rainier"   = "#b8a6c9",
+  "Other"                            = "#e5e7e9"
+)
+
+# --- 2. Extent, clip, and dissolve by practical group -----------------------
+geo_fig_bbox <- current_system %>%
+  sf::st_buffer(6000) %>%
+  sf::st_transform(3857) %>%
+  sf::st_bbox()
+
+# Dissolving by group removes internal contacts, so the polygon outlines
+# that remain are the major contacts between practical groups.
+dissolve_geo <- function(geo, groups, colors) {
+  geo %>%
+    sf::st_transform(3857) %>%
+    sf::st_make_valid() %>%
+    sf::st_crop(geo_fig_bbox) %>%
+    dplyr::left_join(groups, by = "unit_symbol") %>%
+    dplyr::mutate(geo_group = dplyr::coalesce(geo_group, "Other")) %>%
+    dplyr::group_by(geo_group) %>%
+    dplyr::summarize(.groups = "drop") %>%
+    dplyr::mutate(geo_group = factor(geo_group, levels = names(colors)))
+}
+
+bedrock_fig_geo   <- dissolve_geo(bedrock_geo, bedrock_groups, bedrock_colors)
+surficial_fig_geo <- dissolve_geo(surficial_geo, surficial_groups, surficial_colors)
+
+# Faults, labeled by name; positional accuracy sets the line type
+geo_fig_faults <- sf::st_read("data/park/MORA/mora_geology_gpkg/mora_geology.gpkg",
+                              layer = "MORA_Faults", quiet = TRUE) %>%
+  janitor::clean_names() %>%
+  sf::st_transform(3857) %>%
+  sf::st_crop(geo_fig_bbox) %>%
+  dplyr::mutate(accuracy = dplyr::if_else(positional_accuracy == "approximate",
+                                          "Fault, approximate", "Fault, known"))
+
+geo_fig_fault_labels <- geo_fig_faults %>%
+  dplyr::group_by(feature_name) %>%
+  dplyr::summarize(.groups = "drop") %>%
+  sf::st_point_on_surface()
+
+# --- 3. Basemap and panels --------------------------------------------------
+geo_tiles <- get_nps_basemap(aoi = sf::st_as_sfc(geo_fig_bbox), style = "standard",
+                             buffer_km = 0.5, zoom = 13)
+
+geo_fig_panel <- function(geo, colors, title) {
+  ggplot() +
+    geom_nps_basemap(geo_tiles) +
+    geom_sf(data = geo, aes(fill = geo_group), color = "black",
+            linewidth = 0.3, alpha = 0.75) +
+    geom_sf(data = geo_fig_faults, aes(linetype = accuracy),
+            color = "red3", linewidth = 1) +
+    geom_sf_label(data = geo_fig_fault_labels, aes(label = feature_name),
+                  size = 2.5, color = "red3", label.size = 0,
+                  fill = scales::alpha("white", 0.8), hjust = 1, nudge_x = -200) +
+    geom_sf(data = site_fig_watersheds_3857, fill = NA, color = "black",
+            linewidth = 0.6, linetype = "dotted") +
+    geom_sf(data = site_fig_point_3857, fill = "tomato", color = "black",
+            shape = 21, size = 2, stroke = 0.8) +
+    geom_sf(data = potential_intake_3857, fill = NA, color = "black",
+            shape = 21, size = 2, stroke = 0.8) +
+    scale_fill_manual("", values = colors, drop = TRUE) +
+    scale_linetype_manual("", values = c("Fault, known" = "solid",
+                                         "Fault, approximate" = "dashed")) +
+    ggspatial::annotation_scale(location = "bl", width_hint = 0.3) +
+    ggspatial::annotation_north_arrow(location = "tr", which_north = "true",
+                                      height = unit(1, "cm"), width = unit(1, "cm"),
+                                      style = ggspatial::north_arrow_fancy_orienteering()) +
+    coord_sf(xlim = c(geo_fig_bbox["xmin"], geo_fig_bbox["xmax"]),
+             ylim = c(geo_fig_bbox["ymin"], geo_fig_bbox["ymax"]),
+             crs = 3857, expand = FALSE) +
+    labs(title = title) +
+    theme_void() +
+    theme(legend.position = "bottom",
+          legend.text = element_text(size = 8),
+          legend.key.size = unit(0.4, "cm"),
+          plot.title = element_text(face = "bold", size = 11),
+          panel.border = element_rect(colour = "black", fill = NA, linewidth = 1)) +
+    guides(fill = guide_legend(ncol = 2, order = 1),
+           linetype = guide_legend(ncol = 1, order = 2))
+}
+
+geology_fig <- ggarrange(
+  geo_fig_panel(bedrock_fig_geo, bedrock_colors, "(a) Bedrock geology"),
+  geo_fig_panel(surficial_fig_geo, surficial_colors, "(b) Surficial geology"),
+  ncol = 2, align = "hv"
+)
+
+geology_fig
+
+ggsave(geology_fig, filename = "data/park/MORA/Figs/geology_fig.jpg",
+       width = 11, height = 7.5, dpi = 600, bg = "white")
+
+# Workspace cleanup: these are no longer used after this point.
+rm(bedrock_groups, surficial_groups, bedrock_colors, surficial_colors, geo_fig_bbox,
+   dissolve_geo, bedrock_fig_geo, surficial_fig_geo, geo_fig_faults,
+   geo_fig_fault_labels, geo_tiles, geo_fig_panel)
 gc()
 
 ```
@@ -6775,10 +6991,23 @@ use_fig[[1]] <- ggplot(p_dat, aes(x = month_date)) +
   # color = group on the colored line layer below.
   geom_line(aes(y = mean_use, group = group), color = "black", lineend = "round", lwd = 2) +
   geom_line(aes(y = mean_use, color = group), lwd = 1, lineend = "round") +
+  # Observed (metered) mean monthly use, pre- and post-leak, as dashed lines
+  # without ribbons so the modeled envelopes stay readable.
+  geom_line(data = observed_monthly_use_proportions,
+            aes(y = mean_use, color = group),
+            lwd = 0.8, linetype = "22", lineend = "round") +
   theme_wsva() +
-  scale_color_manual("", values = c("Projected" = pal$orange, "Historical" = pal$darkblue)) +
-  scale_fill_manual("", values = c("Projected" = pal$orange, "Historical" = pal$darkblue)) +
-  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K")) +
+  scale_color_manual("", values = c("Historical" = pal$darkblue,
+                                    "Projected" = pal$orange,
+                                    "Recorded Pre-Leak" = pal$teal,
+                                    "Recorded Post-Leak" = pal$pink),
+                     breaks = c("Historical", "Projected",
+                                "Recorded Pre-Leak", "Recorded Post-Leak")) +
+  scale_fill_manual("", values = c("Projected" = pal$orange, "Historical" = pal$darkblue),
+                    guide = "none") +
+  guides(color = guide_legend(override.aes = list(
+    linetype = c("solid", "solid", "22", "22")), nrow = 2)) +
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K", big.mark = ",")) +
   labs(x = "", y = "Monthly Use (gal)") +
   scale_x_date(labels = date_format("%b")) +
   theme(legend.position = "bottom", legend.margin = margin(t = 0, b = 0, l = 0, r = 0))
@@ -6835,7 +7064,9 @@ use_fig[[2]] <- ggplot(p_dat2, aes(x = year)) +
 hf_use_fig <- ggarrange(use_fig[[1]], use_fig[[2]], common.legend = TRUE, align = "hv", legend = "bottom")
 hf_use_fig
 ggsave(hf_use_fig, filename = "data/park/MORA/Figs/hf_use_fig.jpg",
-       dpi = 600, width = 7, height = 2.5)
+       dpi = 600, width = 7, height = 2.8)
+
+rm(observed_monthly_use_proportions)
 
 
 ```
