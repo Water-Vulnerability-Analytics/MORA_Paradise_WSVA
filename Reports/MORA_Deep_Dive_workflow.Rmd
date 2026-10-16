@@ -2138,14 +2138,15 @@ ggplot() +
   theme(
     legend.position = "bottom",
     axis.title.y.right = element_text(color = "skyblue4"),
-    strip.background = element_rect(fill = "gray95")
+    strip.background = element_rect(fill = "gray95"),
+    text = element_text(size = 11)
   ) +
   labs(
     x = "",
     title = "Paradise Creek"
   )
 
-ggsave("data/park/MORA/Figs/Paradise_Creek_USGS.jpg", dpi = 600, width = 7, height = 6)
+ggsave("data/park/MORA/Figs/Paradise_Creek_USGS.jpg", dpi = 600, width = 8, height = 4)
 
 # Workspace cleanup: these are no longer used after this point.
 rm(max_p, max_q, paradise_q, snotel_p)
@@ -2938,12 +2939,13 @@ setorder(wbm, date)
 
 ```
 
-## - Routing
+## - Nisqually Routing
 
-Run routing function for nisqually watershed for soft evaluation of performance
-of WBM and routing for representing flow in this region.
+Run routing function for the Nisqually watershed for soft evaluation of performance
+of WBM and routing for representing flow in this region. We compare routing results
+to VIC and RVIC for the same gauge using NLDAS2 inputs.
 
-```{r routing_model}
+```{r routing_nisqually_compare_to_vic}
 
 
 #clim_basin <- get_climate_historic(sf = basin %>%
@@ -3385,6 +3387,8 @@ gc()
 ```
 
 
+## - Edith Routing
+
 ```{r}
 
 observed_flow <- data.frame(date = c(as.Date("2026-09-03")),
@@ -3471,7 +3475,6 @@ wbm <- wbm %>%
       )
   }) %>%
   dplyr::ungroup()
-
 
 
 ggplot(wbm %>% dplyr::filter(year(date) %in% c(2025, 2026),
