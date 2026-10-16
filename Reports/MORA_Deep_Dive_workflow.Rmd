@@ -6321,14 +6321,88 @@ readr::write_csv(snotel_sp_summary, "data/park/MORA/Tables/snotel_snow_persisten
 readr::write_csv(sp_agreement, "data/park/MORA/Tables/snow_persistence_agreement.csv")
 readr::write_csv(wbm_melt_change, "data/park/MORA/Tables/wbm_melt_out_change.csv")
 
-# Figure: persistence from all three sources (top) and melt-out date (bottom)
+# --- ENSO -------------------------------------------------------------------
+# Winter Oceanic Nino Index (mean of the DJF and JFM windows, the same
+# definition as the enso_sp chunk), cached locally so the index is only
+# downloaded once. Phase: El Nino >= 0.5, La Nina <= -0.5, otherwise neutral.
+oni_path <- "data/park/MORA/oni_monthly.csv"
+if (!file.exists(oni_path)) {
+  readr::write_csv(rsoi::download_oni(), oni_path)
+}
+winter_oni <- readr::read_csv(oni_path, show_col_types = FALSE) %>%
+  dplyr::filter(ONI_month_window %in% c("DJF", "JFM")) %>%
+  dplyr::group_by(year = Year) %>%
+  dplyr::summarize(winter_oni = mean(ONI, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(phase = dplyr::case_when(winter_oni >= 0.5 ~ "El Niño",
+                                         winter_oni <= -0.5 ~ "La Niña",
+                                         TRUE ~ "Neutral"),
+                phase = factor(phase, levels = c("La Niña", "Neutral", "El Niño")))
+
+enso_obs <- snotel_sp_annual %>%
+  dplyr::full_join(snotel_melt, by = "year") %>%
+  dplyr::left_join(wbm_sp_annual %>% dplyr::filter(CF == "Historical") %>%
+                     dplyr::select(year, wbm_sp), by = "year") %>%
+  dplyr::left_join(wbm_melt %>% dplyr::filter(CF == "Historical") %>%
+                     dplyr::select(year, wbm_melt_doy = melt_doy), by = "year") %>%
+  dplyr::inner_join(winter_oni, by = "year") %>%
+  dplyr::filter(year >= 1981, year <= 2025)
+
+# Means by ENSO phase
+enso_phase_summary <- enso_obs %>%
+  tidyr::pivot_longer(c(snotel_sp, melt_doy, wbm_sp, wbm_melt_doy), names_to = "metric") %>%
+  tidyr::drop_na(value) %>%
+  dplyr::group_by(metric, phase) %>%
+  dplyr::summarize(n_years = dplyr::n(), mean = mean(value), min = min(value), max = max(value),
+                   .groups = "drop")
+
+# ENSO effect and long-term trend estimated together:
+# metric ~ year + winter ONI (trend holding ENSO constant, and vice versa)
+enso_fit <- function(y, label) {
+  d <- tidyr::drop_na(enso_obs[, c("year", "winter_oni", y)])
+  f <- summary(lm(stats::reformulate(c("year", "winter_oni"), y), data = d))$coefficients
+  tibble::tibble(metric = label, n_years = nrow(d),
+                 oni_coef = f["winter_oni", "Estimate"], oni_p = f["winter_oni", "Pr(>|t|)"],
+                 year_coef = f["year", "Estimate"], year_p = f["year", "Pr(>|t|)"],
+                 spearman_oni = stats::cor(d$winter_oni, d[[y]], method = "spearman"))
+}
+enso_effects <- dplyr::bind_rows(
+  enso_fit("snotel_sp", "SNOTEL persistence (%)"),
+  enso_fit("melt_doy", "SNOTEL melt-out (day of year)"),
+  enso_fit("wbm_sp", "WBM persistence (%)"),
+  enso_fit("wbm_melt_doy", "WBM melt-out (day of year)"))
+
+print(enso_phase_summary, n = Inf)
+print(enso_effects)
+readr::write_csv(enso_phase_summary, "data/park/MORA/Tables/enso_snow_phase_summary.csv")
+readr::write_csv(enso_effects, "data/park/MORA/Tables/enso_snow_effects.csv")
+
+enso_rects <- winter_oni %>%
+  dplyr::filter(year >= 1980, year <= 2026, phase != "Neutral") %>%
+  dplyr::mutate(xmin = year - 0.5, xmax = year + 0.5)
+enso_layer <- list(
+  geom_rect(data = enso_rects, aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = phase),
+            alpha = 0.18, inherit.aes = FALSE),
+  scale_fill_manual("Winter ENSO phase", values = c("El Niño" = "#d95f02", "La Niña" = "#1b9e77")))
+
+# Figure: persistence from all three sources (top) and melt-out date (bottom),
+# with El Nino and La Nina winters shaded
 sp_obs_colors <- c(plot_colors, "Satellite (Edith Current)" = "black", "SNOTEL (Paradise)" = pal$gold)
-sp_panel <- wbm_sp_fig +
+sp_panel <- ggplot() + enso_layer +
+  geom_line(data = wbm_sp_annual %>% dplyr::filter(year >= hist_yrs[1]),
+            aes(x = year, y = wbm_sp, color = CF), linewidth = 0.7) +
+  geom_point(data = sp_system_ts %>% dplyr::filter(system == "Edith Current"),
+             aes(x = year, y = mean_sp, color = "Satellite (Edith Current)"), size = 1.8) +
+  labs(x = NULL, y = "Snow persistence, Jan 1 - Jul 3 (%)") +
+  theme_wsva() +
+  theme(legend.box = "vertical", legend.spacing.y = unit(0, "pt")) +
+  guides(fill = guide_legend(order = 1, nrow = 1),
+         color = guide_legend(order = 2, nrow = 2)) +
   geom_line(data = snotel_sp_annual, aes(x = year, y = snotel_sp, color = "SNOTEL (Paradise)"),
             inherit.aes = FALSE, linewidth = 0.9) +
   scale_color_manual("", values = sp_obs_colors)
 melt_panel <- ggplot(wbm_melt %>% dplyr::filter(year >= hist_yrs[1]),
                      aes(x = year, y = as.Date(melt_doy - 1, origin = "2001-01-01"), color = CF)) +
+  enso_layer +
   geom_line(linewidth = 0.7) +
   geom_line(data = snotel_melt, aes(x = year, y = as.Date(melt_doy - 1, origin = "2001-01-01"),
                                      color = "SNOTEL (Paradise)"), inherit.aes = FALSE, linewidth = 0.9) +
@@ -6342,7 +6416,7 @@ ggsave(sp_three_fig, filename = "data/park/MORA/Figs/snow_persistence_three_sour
        dpi = 600, width = 7, height = 7, bg = "white")
 
 rm(sp_trend_test, wbm_sp_hist, wbm_sat_sp, snotel_swe, melt_out_doy, sp_three, sp_sat, melt_pair,
-   mk_row, sp_obs_colors, sp_panel, melt_panel)
+   mk_row, sp_obs_colors, sp_panel, melt_panel, oni_path, enso_obs, enso_fit, enso_rects, enso_layer)
 
 ```
 
