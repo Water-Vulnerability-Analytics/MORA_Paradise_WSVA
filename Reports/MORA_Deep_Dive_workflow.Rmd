@@ -6151,7 +6151,7 @@ gc()
 
 ```
 
-# 7c. Snow persistence from the WBM
+# 7c. Snow persistence from the WBM and SNOTEL
 
 Satellite snow persistence (Hammond et al., 2018) is the fraction of January 1
 to July 3 with snow cover. The same quantity is computed here from the WBM's
@@ -6159,6 +6159,12 @@ daily snowpack for the selected grid cells: the fraction of January 1 to July 3
 days with any modeled snowpack. This extends the record back to 1980 and into
 both climate futures, at the cost of representing the two-cell average rather
 than individual catchments (all three candidate systems share it).
+
+The Paradise SNOTEL station gives a third, ground-based estimate: the fraction
+of January 1 to July 3 days with measured SWE above zero. Because persistence
+sits near 100% at Paradise in most years, the date of snow melt-out (first
+snow-free day after the annual SWE peak) is also computed for SNOTEL and the
+WBM, since it can register changes in timing that persistence cannot.
 
 ```{r wbm_snow_persistence}
 
@@ -6221,7 +6227,122 @@ wbm_sp_fig
 ggsave(wbm_sp_fig, filename = "data/park/MORA/Figs/wbm_snow_persistence.jpg",
        dpi = 600, width = 7, height = 4)
 
-rm(sp_trend_test, wbm_sp_hist, wbm_sat_sp)
+# --- SNOTEL snow persistence and melt-out date ------------------------------
+snotel_swe <- snotel_daily_tidy %>%
+  dplyr::filter(name == "Paradise") %>%
+  dplyr::select(date, swe_in) %>%
+  dplyr::mutate(year = year(date), doy = yday(date))
+
+snotel_sp_annual <- snotel_swe %>%
+  dplyr::filter(doy <= 184) %>%                       # Jan 1 - Jul 3
+  dplyr::group_by(year) %>%
+  dplyr::filter(sum(!is.na(swe_in)) >= 170) %>%       # nearly complete seasons only
+  dplyr::summarize(snotel_sp = 100 * mean(swe_in > 0, na.rm = TRUE), .groups = "drop")
+
+# Melt-out: first snow-free day on or after the annual SWE peak (peak taken
+# from January-July). NA if the series has gaps around melt-out or never
+# reaches zero by September 30.
+melt_out_doy <- function(d, swe_col) {
+  d <- d %>% dplyr::filter(doy <= 273) %>% dplyr::arrange(date)
+  swe <- d[[swe_col]]
+  if (sum(!is.na(swe)) < 250) return(NA_real_)
+  pk <- which.max(ifelse(d$doy <= 212, swe, NA))
+  after <- which(seq_along(swe) >= pk & !is.na(swe) & swe <= 0)
+  if (length(after) == 0) return(NA_real_)
+  first0 <- after[1]
+  if (any(is.na(swe[pk:first0]))) return(NA_real_)
+  d$doy[first0]
+}
+
+snotel_melt <- snotel_swe %>%
+  dplyr::group_by(year) %>%
+  dplyr::group_modify(~ tibble::tibble(melt_doy = melt_out_doy(.x, "swe_in"))) %>%
+  dplyr::ungroup()
+
+wbm_melt <- wbm %>%
+  dplyr::mutate(year = year(date), doy = yday(date)) %>%
+  dplyr::group_by(CF, year) %>%
+  dplyr::group_modify(~ tibble::tibble(melt_doy = melt_out_doy(.x, "snowpack_in_wbm"))) %>%
+  dplyr::ungroup()
+
+# Agreement among the three persistence records over shared years
+sp_three <- snotel_sp_annual %>%
+  dplyr::inner_join(wbm_sp_annual %>% dplyr::filter(CF == "Historical") %>%
+                      dplyr::select(year, wbm_sp), by = "year") %>%
+  dplyr::left_join(sp_system_ts %>% dplyr::filter(system == "Edith Current") %>%
+                     dplyr::select(year, satellite_sp = mean_sp), by = "year")
+sp_sat <- tidyr::drop_na(sp_three, satellite_sp)
+
+melt_pair <- snotel_melt %>%
+  dplyr::inner_join(wbm_melt %>% dplyr::filter(CF == "Historical") %>%
+                      dplyr::select(year, wbm_melt_doy = melt_doy), by = "year") %>%
+  tidyr::drop_na()
+
+mk_row <- function(y, x, label, metric) {
+  ok <- !is.na(x)
+  tibble::tibble(series = label, metric = metric, first_year = min(y[ok]), last_year = max(y[ok]),
+                 n_years = sum(ok), mean = mean(x[ok]), min = min(x[ok]), max = max(x[ok]),
+                 sens_slope_per_yr = as.numeric(trend::sens.slope(x[ok])$estimates),
+                 mk_p_value = trend::mk.test(x[ok])$p.value)
+}
+
+snotel_sp_summary <- dplyr::bind_rows(
+  mk_row(snotel_sp_annual$year, snotel_sp_annual$snotel_sp, "SNOTEL (Paradise)", "persistence_pct"),
+  mk_row(sp_three$year, sp_three$wbm_sp, "WBM, SNOTEL years", "persistence_pct"),
+  mk_row(sp_sat$year, sp_sat$snotel_sp, "SNOTEL, satellite years", "persistence_pct"),
+  mk_row(sp_sat$year, sp_sat$satellite_sp, "Satellite (Edith Current), SNOTEL years", "persistence_pct"),
+  mk_row(snotel_melt$year, snotel_melt$melt_doy, "SNOTEL (Paradise)", "melt_out_doy"),
+  mk_row(melt_pair$year, melt_pair$wbm_melt_doy, "WBM, SNOTEL years", "melt_out_doy"))
+
+sp_agreement <- tibble::tibble(
+  comparison = c("SNOTEL vs WBM persistence", "SNOTEL vs satellite persistence",
+                 "SNOTEL vs WBM melt-out date"),
+  n_years = c(nrow(sp_three), nrow(sp_sat), nrow(melt_pair)),
+  r = c(cor(sp_three$snotel_sp, sp_three$wbm_sp), cor(sp_sat$snotel_sp, sp_sat$satellite_sp),
+        cor(melt_pair$melt_doy, melt_pair$wbm_melt_doy)),
+  mean_difference = c(mean(sp_three$wbm_sp - sp_three$snotel_sp),
+                      mean(sp_sat$satellite_sp - sp_sat$snotel_sp),
+                      mean(melt_pair$wbm_melt_doy - melt_pair$melt_doy)))
+
+# WBM melt-out by period (historical baseline vs. mid-century)
+wbm_melt_change <- wbm_melt %>%
+  dplyr::filter((CF == "Historical" & year >= hist_yrs[1] & year <= hist_yrs[2]) |
+                (CF != "Historical" & year >= fut_yrs[1] & year <= fut_yrs[2])) %>%
+  dplyr::group_by(CF) %>%
+  dplyr::summarize(mean_melt_doy = mean(melt_doy, na.rm = TRUE),
+                   n_years = sum(!is.na(melt_doy)), .groups = "drop") %>%
+  dplyr::mutate(change_days = mean_melt_doy - mean_melt_doy[CF == "Historical"])
+
+print(snotel_sp_summary)
+print(sp_agreement)
+print(wbm_melt_change)
+
+readr::write_csv(snotel_sp_summary, "data/park/MORA/Tables/snotel_snow_persistence.csv")
+readr::write_csv(sp_agreement, "data/park/MORA/Tables/snow_persistence_agreement.csv")
+readr::write_csv(wbm_melt_change, "data/park/MORA/Tables/wbm_melt_out_change.csv")
+
+# Figure: persistence from all three sources (top) and melt-out date (bottom)
+sp_obs_colors <- c(plot_colors, "Satellite (Edith Current)" = "black", "SNOTEL (Paradise)" = pal$gold)
+sp_panel <- wbm_sp_fig +
+  geom_line(data = snotel_sp_annual, aes(x = year, y = snotel_sp, color = "SNOTEL (Paradise)"),
+            inherit.aes = FALSE, linewidth = 0.9) +
+  scale_color_manual("", values = sp_obs_colors)
+melt_panel <- ggplot(wbm_melt %>% dplyr::filter(year >= hist_yrs[1]),
+                     aes(x = year, y = as.Date(melt_doy - 1, origin = "2001-01-01"), color = CF)) +
+  geom_line(linewidth = 0.7) +
+  geom_line(data = snotel_melt, aes(x = year, y = as.Date(melt_doy - 1, origin = "2001-01-01"),
+                                     color = "SNOTEL (Paradise)"), inherit.aes = FALSE, linewidth = 0.9) +
+  scale_color_manual("", values = sp_obs_colors) +
+  scale_y_date(date_labels = "%b %d") +
+  labs(x = NULL, y = "Snow melt-out date") +
+  theme_wsva()
+sp_three_fig <- ggarrange(sp_panel, melt_panel, ncol = 1, common.legend = TRUE, legend = "bottom", align = "v")
+sp_three_fig
+ggsave(sp_three_fig, filename = "data/park/MORA/Figs/snow_persistence_three_sources.jpg",
+       dpi = 600, width = 7, height = 7, bg = "white")
+
+rm(sp_trend_test, wbm_sp_hist, wbm_sat_sp, snotel_swe, melt_out_doy, sp_three, sp_sat, melt_pair,
+   mk_row, sp_obs_colors, sp_panel, melt_panel)
 
 ```
 
