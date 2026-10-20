@@ -5525,13 +5525,13 @@ fpr <- ggplot(all_delta_fireprob, aes(x = mean_runoff_in, y = delta_fp)) +
   geom_point(data = delta_fireprob %>%
                dplyr::filter(CF %in% c("Snowy Wet", "Less Snowy Dry")), aes(x = mean_runoff_in, y = delta_fp), shape = 1, size = 5) +
   labs(x = "Projected Mean Annual Runoff (in)",
-       y = "Delta Fire Probability (Gao et al., 2021)") +
+       y = "Delta Fire Probability") +
   geom_smooth(method = "lm", color = "black")
 
 fpr
 
 ggsave("data/park/MORA/Figs/fire_prob_runoff_corr_fig.jpg", plot = fpr,
-       dpi = 600, height = 5, width = 8, units = "in")
+       dpi = 600, height = 6, width = 10, units = "in")
 
 # Linear fit of change in fire probability on projected mean annual runoff
 # across GCMs (the line in the figure), reported in Appendix A
