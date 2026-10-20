@@ -5419,6 +5419,39 @@ burned_fraction_of_watershed <- park_new_geomac %>%
 # regardless of the actual value. Report as a percentage instead.
 print(paste0("Burned fraction of watershed is ", scales::percent(burned_fraction_of_watershed, accuracy = 0.1)))
 
+# What the in-park perimeters actually are. Every polygon intersecting the
+# park comes from one USFS source whose comment field reads "Year burned
+# determined by PNW using carbon dating": reconstructed fire-history / stand-
+# origin polygons, with the same polygon repeated under several fire years.
+# Several have straight edges at a fixed latitude (study-area or map limits)
+# rather than mapped fire boundaries. Summarize by year and source, and the
+# share of the park burned by period, so the text can separate prehistoric
+# reconstructions from documented modern fires.
+park_area_m2 <- as.numeric(sf::st_area(fire_aoi))
+burned_share <- function(f) {
+  if (nrow(f) == 0) return(0)
+  f %>% sf::st_make_valid() %>% dplyr::summarize() %>%
+    sf::st_transform(crs = sf::st_crs(fire_aoi)) %>%
+    sf::st_intersection(fire_aoi) %>% sf::st_area() %>% as.numeric() %>% sum() / park_area_m2
+}
+park_fire_years <- park_new_geomac %>%
+  sf::st_drop_geometry() %>%
+  dplyr::mutate(FIRE_YEAR = as.numeric(FIRE_YEAR)) %>%
+  dplyr::count(FIRE_YEAR, SOURCE, COMMENTS, name = "n_polygons")
+park_fire_history <- tibble::tibble(
+  period = c("All years", "Since 1800", "Since 1900"),
+  min_year = c(-Inf, 1800, 1900)) %>%
+  dplyr::mutate(
+    n_polygons = purrr::map_int(min_year, ~ sum(as.numeric(park_new_geomac$FIRE_YEAR) >= .x)),
+    pct_park_burned = purrr::map_dbl(min_year, ~ 100 * burned_share(
+      dplyr::filter(park_new_geomac, as.numeric(FIRE_YEAR) >= .x))),
+    latest_fire_year = max(as.numeric(park_new_geomac$FIRE_YEAR)))
+print(park_fire_years)
+print(park_fire_history)
+readr::write_csv(park_fire_years, "data/park/MORA/Tables/park_fire_years.csv")
+readr::write_csv(park_fire_history, "data/park/MORA/Tables/park_fire_history.csv")
+rm(park_area_m2, burned_share)
+
 ```
 
 ```{r fire_by_system}
