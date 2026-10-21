@@ -126,9 +126,17 @@ clim_fut <- clim_fut %>%
   dplyr::mutate(x = get_nearest(x, clim_hist$x),
                 y = get_nearest(y, clim_hist$y))
 
-mapview(aoi_gridmet_grid) +
-  mapview(clim_pts) +
-  mapview(system_watershed)
+mapview(aoi_gridmet_grid,
+        layer.name = "Gridmet Grid",
+        color = "red",
+        alpha.regions = 0,
+        lwd = 3) +
+  mapview(clim_pts,
+          layer.name = "Grid Points",
+          col.regions = "red") +
+  mapview(system_watershed,
+          col.regions = "dodgerblue",
+          layer.name = "Edith Watershed")
 
 ```
 
