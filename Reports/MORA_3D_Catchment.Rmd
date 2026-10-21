@@ -1,0 +1,527 @@
+---
+title: "MORA Paradise - 3D Catchment Views"
+author: "ROSSyndicate"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+This R markdown builds 3D views of the three candidate source catchments for the
+Paradise water system (Edith Current, Edith Downstream, and Paradise GW) from the
+Washington Geological Survey lidar DTM, with vertical exaggeration and either
+draped aerial imagery or a shaded-relief texture. A second view sets the
+catchments against Mount Rainier using a coarser public DEM.
+
+Rendering uses {rayshader}. On macOS, {rgl} and {rayrender} need XQuartz
+(<https://www.xquartz.org>) to load, even when no window is opened. Install it
+once (`brew install --cask xquartz`, then log out and back in).
+
+# 1. Setup
+
+```{r setup}
+
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      eval = TRUE)
+
+knitr::opts_knit$set(root.dir = here::here())
+
+source(here::here("Reports/report_setup.R"))
+
+# Render off-screen by default. Set TRUE for a live window you can rotate by
+# hand; this needs XQuartz running (log out and back in after installing it),
+# otherwise rgl crashes the R session when it opens the window. Restart R after
+# changing it, since rgl reads this option when it loads.
+open_window <- FALSE
+options(rgl.useNULL = !open_window)
+library(rayshader)
+
+```
+
+## - Figure settings
+
+Everything that controls the look of the figures is set here.
+
+```{r settings}
+
+# Vertical exaggeration (1 = true relief). 2 reads well for this relief.
+z_exag <- 2
+
+# Lidar is 1.5 ft; aggregate by this factor for rendering (6 -> 9 ft cells).
+# Lower for more detail, at the cost of memory and render time.
+dem_agg <- 6
+
+# Buffer around the Paradise River catchment for the basin view (ft)
+aoi_buffer_ft <- 1500
+
+# Surface texture: "imagery" (Esri World Imagery) or "hillshade"
+drape <- "imagery"
+
+# Catchment styling: outline width (texture pixels) and fill opacity. The
+# catchments are nested, so the fill deepens toward Edith Current.
+outline_width <- 8
+fill_alpha <- 0.18
+
+# Imagery tile zoom (16 is ~2 m per pixel at this latitude)
+imagery_zoom <- 16
+
+# Camera for the basin view: theta = compass direction the camera sits on,
+# measured as rotation around the scene (0 = looking north from the south),
+# phi = elevation angle above the horizon, zoom < 1 moves in.
+cam_basin <- list(theta = -43, phi = 28, zoom = 0.74, fov = 40)
+cam_mountain <- list(theta = 15, phi = 25, zoom = 0.65, fov = 40)
+
+# Preview mode: TRUE shows a quick software render (a few seconds) in the plot
+# pane instead of the path-traced figure, for tuning the camera. Set FALSE for
+# the final figures.
+preview <- TRUE
+
+# Output size (px) and path tracer samples for render_highquality()
+out_width <- 2200
+out_height <- 1800
+hq_samples <- 256
+
+# Catchment colors match the other report figures
+system_colors <- c("Edith Current"    = "#1b6ca8",
+                   "Edith Downstream" = "#459a74",
+                   "Paradise GW"      = "#a1631f")
+
+# Callout boxes for the basin view. Boxes sit in the white space above the
+# terrain; box_x and box_y are the box centers as fractions of the image width
+# and height (from the top left). Each leader line runs to a point on that
+# catchment's own outline, skipping stretches drawn over by a smaller nested
+# catchment: the point nearest aim_x/aim_y if given, otherwise nearest the box.
+# Adjust these after changing the camera.
+callouts <- tibble::tribble(
+  ~system,            ~label,              ~box_x, ~box_y, ~aim_x, ~aim_y,
+  "Edith Downstream", "Edith Downstream",   0.10,   0.24,   NA,     NA,
+  "Edith Current",    "Current Catchment",  0.45,   0.15,   NA,     NA,
+  "Paradise GW",      "Paradise Valley",    0.70,   0.25,   NA,     NA
+)
+
+# White band added above the render to hold the callouts (fraction of the
+# render height). Set to 0 if the camera already leaves enough sky.
+callout_band <- 0.10
+
+fig_dir <- "data/park/MORA/Figs"
+
+```
+
+# 2. Catchments, streams, and outlets
+
+Same catchment files as `MORA_Deep_Dive_workflow.Rmd`. The lidar DTM is in
+Washington State Plane South (US ft), which is close to north-up here, so the
+vectors are projected to the DEM rather than the other way around.
+
+```{r vectors}
+
+dem_path <- "data/park/MORA/lidar_DTM_paradise.tif"
+dem_crs <- terra::crs(terra::rast(dem_path))
+
+catchments <- dplyr::bind_rows(
+  sf::st_read("data/park/MORA/edithcreek_watershed.gpkg", quiet = TRUE) %>%
+    dplyr::mutate(system = "Edith Current"),
+  sf::st_read("data/park/MORA/downstream_edithcreek/downstream_edithcreek_watershed.gpkg",
+              quiet = TRUE) %>%
+    dplyr::mutate(system = "Edith Downstream"),
+  sf::st_read("data/park/MORA/paradise_river/paradise_river_watershed.gpkg",
+              quiet = TRUE) %>%
+    dplyr::mutate(system = "Paradise GW")
+) %>%
+  dplyr::select(system) %>%
+  sf::st_transform(dem_crs) %>%
+  dplyr::mutate(system = factor(system, levels = names(system_colors)))
+
+streams <- sf::st_read("data/park/MORA/paradise_river_streams.gpkg", quiet = TRUE) %>%
+  sf::st_transform(dem_crs)
+
+# Outlets: the existing Edith Creek intake (water system database) and the
+# snapped pour points used to delineate the two downstream catchments
+current_intake <- get_wsd() %>%
+  dplyr::filter(park_unit == "MORA",
+                grepl("Paradise", water_system_name)) %>%
+  sf::st_transform(dem_crs) %>%
+  dplyr::transmute(system = "Edith Current")
+
+outlets <- dplyr::bind_rows(
+  current_intake,
+  sf::st_read("data/park/MORA/downstream_edithcreek/downstream_edithcreek_snapped_pour_point.shp",
+              quiet = TRUE) %>%
+    dplyr::transmute(system = "Edith Downstream") %>%
+    sf::st_transform(dem_crs),
+  sf::st_read("data/park/MORA/paradise_river/paradise_river_snapped_pour_point.shp",
+              quiet = TRUE) %>%
+    dplyr::transmute(system = "Paradise GW") %>%
+    sf::st_transform(dem_crs)
+) %>%
+  sf::st_zm() %>%
+  dplyr::mutate(system = factor(system, levels = names(system_colors)))
+
+```
+
+# 3. Helper functions
+
+`drape_texture()` builds the surface texture for a DEM, and `add_catchments()`
+adds the catchment outlines, streams, and outlets on top. Outlines get a white
+halo so they read on both imagery and shaded relief.
+
+```{r helpers}
+
+# Esri World Imagery tiles warped onto the DEM grid, as an RGB array in [0, 1]
+get_imagery <- function(dem, zoom) {
+  aoi <- sf::st_as_sfc(sf::st_bbox(dem)) %>%
+    sf::st_transform(4326)
+  tiles <- maptiles::get_tiles(aoi, provider = "Esri.WorldImagery",
+                               zoom = zoom, crop = TRUE)
+  img <- terra::project(tiles[[1:3]], dem, method = "bilinear")
+  arr <- terra::as.array(img) / 255
+  arr[is.na(arr)] <- 0
+  pmin(pmax(arr, 0), 1)
+}
+
+drape_texture <- function(dem, elmat, drape, zscale, zoom = 16) {
+  # Terrain shadows are computed at true relief so the sun angle looks natural
+  shadow <- ray_shade(elmat, zscale = zscale, sunaltitude = 35,
+                      sunangle = 225, multicore = TRUE)
+  ambient <- ambient_shade(elmat, zscale = zscale, multicore = TRUE)
+  if (drape == "imagery") {
+    get_imagery(dem, zoom) %>%
+      add_shadow(shadow, max_darken = 0.4) %>%
+      add_shadow(ambient, max_darken = 0.2)
+  } else {
+    # Muted hypsometric tint from valley forest to alpine rock and snow
+    hypso <- grDevices::colorRampPalette(
+      c("#4f6b4a", "#7d8f62", "#b3ad86", "#d8d0bc", "#f4f2ee"))(256)
+    elmat %>%
+      height_shade(texture = hypso) %>%
+      add_shadow(lamb_shade(elmat, zscale = zscale, sunangle = 225), 0.3) %>%
+      add_shadow(shadow, max_darken = 0.5) %>%
+      add_shadow(ambient, max_darken = 0.2)
+  }
+}
+
+add_catchments <- function(texture, elmat, extent, line_scale = 2) {
+  out <- texture
+  # Streams first so the catchment outlines sit on top
+  out <- add_overlay(out, generate_line_overlay(
+    streams, extent = extent, heightmap = elmat,
+    color = "#9fd3ff", 
+    linewidth = 2.5 * line_scale))
+  # Largest catchment first; the nested ones draw over it
+  for (s in rev(levels(catchments$system))) {
+    poly <- dplyr::filter(catchments, system == s)
+    edge <- sf::st_cast(poly, "MULTILINESTRING")
+    out <- out %>%
+      add_overlay(generate_polygon_overlay(poly, extent = extent, heightmap = elmat,
+                                           palette = system_colors[[s]],
+                                           linecolor = NA),
+                  alphalayer = fill_alpha) %>%
+      add_overlay(generate_line_overlay(edge, extent = extent, heightmap = elmat,
+                                        color = "white",
+                                        linewidth = (outline_width + 5) * line_scale)) %>%
+      add_overlay(generate_line_overlay(edge, extent = extent, heightmap = elmat,
+                                        color = system_colors[[s]],
+                                        linewidth = outline_width * line_scale))
+  }
+  for (s in levels(outlets$system)) {
+    pt <- dplyr::filter(outlets, system == s)
+    out <- out %>%
+      add_overlay(generate_point_overlay(pt, extent = extent, heightmap = elmat,
+                                         color = "white", size = 7 * line_scale)) %>%
+      add_overlay(generate_point_overlay(pt, extent = extent, heightmap = elmat,
+                                         color = system_colors[[s]],
+                                         size = 4.5 * line_scale))
+  }
+  out
+}
+
+# Candidate leader-line targets: points along each catchment outline, dropping
+# stretches within `shared_ft` of a smaller catchment's outline. The nested
+# catchments share parts of their ridges, and the smaller one is drawn on top,
+# so those stretches show in the smaller catchment's color.
+outline_points <- function(spacing_ft = 30, shared_ft = 60) {
+  edge <- function(s) {
+    catchments %>%
+      dplyr::filter(system %in% s) %>%
+      sf::st_geometry() %>%
+      sf::st_boundary() %>%
+      sf::st_union()
+  }
+  lv <- levels(catchments$system)   # smallest first
+  purrr::map_dfr(seq_along(lv), function(i) {
+    s <- lv[i]
+    pts <- edge(s) %>%
+      sf::st_cast("MULTILINESTRING") %>%
+      sf::st_cast("LINESTRING") %>%
+      sf::st_line_sample(density = 1 / spacing_ft)
+    pts <- sf::st_cast(pts[!sf::st_is_empty(pts)], "POINT")
+    keep <- rep(TRUE, length(pts))
+    if (i > 1) {
+      keep <- as.numeric(sf::st_distance(pts, edge(lv[seq_len(i - 1)]))) > shared_ft
+    }
+    sf::st_sf(system = s, geometry = pts[keep])
+  })
+}
+
+# Position of map points in the rendered image (fractions of width and height
+# from the top left). Uses rayshader's scene coordinates (x = DEM column and
+# z = DEM row, both centered; y = elevation / zscale) and the current rgl
+# camera, which render_highquality() and render_snapshot() also use.
+project_to_image <- function(pts, dem, zscale) {
+  xy <- sf::st_coordinates(pts)[, 1:2, drop = FALSE]
+  cell <- terra::res(dem)[1]
+  elev <- terra::extract(dem, xy)[, 1]
+  scene <- cbind((xy[, 1] - terra::xmin(dem)) / cell - terra::ncol(dem) / 2,
+                 elev / zscale,
+                 (terra::ymax(dem) - xy[, 2]) / cell - terra::nrow(dem) / 2)
+  m <- rgl::par3d(c("modelMatrix", "projMatrix"))
+  h <- cbind(scene, 1) %*% t(m$projMatrix %*% m$modelMatrix)
+  data.frame(fx = (h[, 1] / h[, 4] + 1) / 2,
+             fy = 1 - (h[, 2] / h[, 4] + 1) / 2)
+}
+
+# Callout boxes with leader lines drawn onto a rendered image. `targets` are
+# outline points with their image positions (fx, fy); each box connects to the
+# target of its catchment closest to the box.
+add_callouts <- function(png_in, png_out, targets, band = callout_band) {
+  img <- magick::image_read(png_in)
+  info <- magick::image_info(img)
+  w <- info$width
+  pad <- round(band * info$height)
+  if (pad > 0) {
+    img <- magick::image_append(c(magick::image_blank(w, pad, "white"), img),
+                                stack = TRUE)
+  }
+  h <- info$height + pad
+  s <- w / 2400
+  img <- magick::image_draw(img)
+  for (i in seq_len(nrow(callouts))) {
+    col <- system_colors[[callouts$system[i]]]
+    bx <- callouts$box_x[i] * w
+    by <- callouts$box_y[i] * h
+    tg <- dplyr::filter(targets, system == callouts$system[i])
+    tx <- tg$fx * w
+    ty <- tg$fy * info$height + pad
+    aim_x <- dplyr::coalesce(callouts$aim_x[i], callouts$box_x[i]) * w
+    aim_y <- dplyr::coalesce(callouts$aim_y[i], callouts$box_y[i]) * h
+    j <- which.min((tx - aim_x)^2 + (ty - aim_y)^2)
+    cex <- 3 * s
+    # image_draw() flips the y axis, so text heights come back negative
+    half_w <- abs(strwidth(callouts$label[i], cex = cex, font = 2)) / 2 + 28 * s
+    half_h <- abs(strheight(callouts$label[i], cex = cex, font = 2)) / 2 + 20 * s
+    # Leader starts at the point on the box edge closest to its target
+    sx <- min(max(tx[j], bx - half_w), bx + half_w)
+    sy <- min(max(ty[j], by - half_h), by + half_h)
+    segments(sx, sy, tx[j], ty[j], col = "white", lwd = 7 * s)
+    segments(sx, sy, tx[j], ty[j], col = col, lwd = 3.5 * s)
+    points(tx[j], ty[j], pch = 21, bg = col, col = "white", cex = 2.2 * s, lwd = 3 * s)
+    rect(bx - half_w, by - half_h, bx + half_w, by + half_h,
+         col = "white", border = col, lwd = 4 * s)
+    text(bx, by, callouts$label[i], cex = cex, font = 2, col = "gray15")
+  }
+  dev.off()
+  magick::image_write(img, png_out)
+  png_out
+}
+
+# Legend strip, exaggeration note, and data credits added below the render
+add_legend <- function(png_in, png_out, credit) {
+  img <- magick::image_read(png_in)
+  w <- magick::image_info(img)$width
+  s <- w / 2400
+  bar_h <- round(150 * s)
+  bar <- magick::image_blank(w, bar_h, "white")
+  x <- round(60 * s)
+  for (nm in names(system_colors)) {
+    bar <- bar %>%
+      magick::image_draw()
+    rect(x, bar_h * 0.30, x + 70 * s, bar_h * 0.30 + 16 * s,
+         col = system_colors[[nm]], border = NA)
+    text(x + 85 * s, bar_h * 0.30 + 8 * s, nm, adj = c(0, 0.5),
+         cex = 2.6 * s, font = 2, col = "gray15")
+    dev.off()
+    x <- x + 650 * s
+  }
+  bar <- bar %>%
+    magick::image_annotate(
+      paste0("Vertical exaggeration ", z_exag, "x."),
+      size = round(30 * s), color = "gray25",
+      location = paste0("+", round(60 * s), "+", round(80 * s))) %>%
+    magick::image_annotate(credit, size = round(26 * s), color = "gray40",
+                           location = paste0("+", round(60 * s), "+", round(115 * s)))
+  magick::image_append(c(img, bar), stack = TRUE) %>%
+    magick::image_write(png_out)
+  png_out
+}
+
+```
+
+# 4. Basin view from the lidar DTM
+
+Crop the lidar to the Paradise River catchment plus a buffer, convert elevations
+to the horizontal unit (both are US ft, so no conversion is needed), and
+aggregate for rendering.
+
+```{r basin_dem}
+
+aoi <- catchments %>%
+  sf::st_union() %>%
+  sf::st_buffer(aoi_buffer_ft) %>%
+  sf::st_bbox()
+
+dem_basin <- terra::rast(dem_path) %>%
+  terra::crop(terra::ext(aoi[["xmin"]], aoi[["xmax"]], aoi[["ymin"]], aoi[["ymax"]])) %>%
+  terra::aggregate(fact = dem_agg, fun = "mean", na.rm = TRUE)
+
+# Cell size and elevation are both in US ft
+cell_ft <- terra::res(dem_basin)[1]
+zscale_true <- cell_ft
+zscale_plot <- cell_ft / z_exag
+
+elmat_basin <- raster_to_matrix(dem_basin)
+dim(elmat_basin)
+range(elmat_basin, na.rm = TRUE)
+
+```
+
+```{r basin_texture}
+
+tex_basin <- drape_texture(dem_basin, elmat_basin, drape = drape,
+                           zscale = zscale_true, zoom = imagery_zoom) %>%
+  add_catchments(elmat_basin, extent = terra::ext(dem_basin))
+
+# Flat map of the same texture, useful for checking overlays
+#plot_map(tex_basin)
+
+```
+
+```{r basin_render}
+
+rgl::close3d()
+plot_3d(tex_basin, elmat_basin,
+        zscale = zscale_plot,
+        solid = TRUE, soliddepth = "auto", solidcolor = "gray35",
+        solidlinecolor = "gray25",
+        shadow = TRUE, shadowdepth = "auto", shadowcolor = "gray75",
+        background = "white",
+        # Same aspect as the output, so the callout positions line up
+        windowsize = c(out_width, out_height) / 2)
+
+render_camera(theta = cam_basin$theta, phi = cam_basin$phi,
+              zoom = cam_basin$zoom, fov = cam_basin$fov)
+
+basin_targets <- outline_points()
+basin_targets <- dplyr::bind_cols(sf::st_drop_geometry(basin_targets),
+                                  project_to_image(basin_targets, dem_basin, zscale_plot))
+
+basin_raw <- file.path(fig_dir, paste0("catchment_3d_basin_", drape, "_raw.png"))
+
+basin_callout_png <- file.path(fig_dir, paste0("catchment_3d_basin_", drape, "_callouts.png"))
+if (preview) {
+  preview_png <- tempfile(fileext = ".png")
+  render_snapshot(filename = preview_png, software_render = TRUE,
+                  width = out_width / 2, height = out_height / 2)
+  add_callouts(preview_png, preview_png, basin_targets)
+  plot(magick::image_read(preview_png))
+} else {
+  render_highquality(filename = basin_raw,
+                     samples = hq_samples,
+                     width = out_width, height = out_height,
+                     lightdirection = c(225, 45), lightaltitude = c(55,60),
+                     lightintensity = c(700, 250), lightcolor = c("white", "white"),
+                     interactive = FALSE, preview = FALSE)
+
+  add_callouts(basin_raw, basin_callout_png, basin_targets)
+  add_legend(basin_callout_png,
+             file.path(fig_dir, paste0("catchment_3d_basin_", drape, ".png")),
+             credit = paste0("Elevation: Washington Geological Survey lidar DTM. ",
+                             if (drape == "imagery") "Imagery: Esri World Imagery."
+                             else "Shaded relief from the lidar DTM."))
+}
+
+```
+
+# 5. Mountain context view
+
+The lidar stops below the upper mountain, so this view uses the AWS Terrain
+Tiles (USGS 3DEP in the U.S.) through {elevatr} at roughly 10 m to place the
+catchments below the summit. The extent runs from below the Paradise River
+outlet to just north of the summit.
+
+```{r mountain_dem}
+
+mtn_aoi <- sf::st_bbox(c(xmin = -121.84, ymin = 46.755,
+                         xmax = -121.65, ymax = 46.875),
+                       crs = sf::st_crs(4326)) %>%
+  sf::st_as_sfc() %>%
+  sf::st_as_sf()
+
+dem_mtn <- elevatr::get_elev_raster(mtn_aoi, z = 14, src = "aws", clip = "bbox") %>%
+  terra::rast() %>%
+  terra::project(dem_crs, res = 33) # ~10 m cells in US ft
+
+# elevatr returns meters; convert to US ft to match the horizontal unit
+dem_mtn <- dem_mtn / 0.3048006
+dem_mtn <- terra::trim(dem_mtn)
+
+elmat_mtn <- raster_to_matrix(dem_mtn)
+cell_mtn <- terra::res(dem_mtn)[1]
+dim(elmat_mtn)
+
+```
+
+```{r mountain_render}
+
+tex_mtn <- drape_texture(dem_mtn, elmat_mtn, drape = drape,
+                         zscale = cell_mtn, zoom = imagery_zoom - 2) %>%
+  add_catchments(elmat_mtn, extent = terra::ext(dem_mtn), line_scale = 1.3)
+
+plot_map(tex_mtn)
+
+rgl::close3d()
+plot_3d(tex_mtn, elmat_mtn,
+        zscale = cell_mtn / z_exag,
+        solid = TRUE, soliddepth = "auto", solidcolor = "gray35",
+        solidlinecolor = "gray25",
+        shadow = TRUE, shadowdepth = "auto", shadowcolor = "gray75",
+        background = "white",
+        windowsize = c(1400, 950))
+render_camera(theta = cam_mountain$theta, phi = cam_mountain$phi,
+              zoom = cam_mountain$zoom, fov = cam_mountain$fov)
+
+mtn_raw <- file.path(fig_dir, paste0("catchment_3d_mountain_", drape, "_raw.png"))
+if (preview) {
+  render_snapshot(software_render = TRUE,
+                  width = out_width / 2, height = out_height / 2)
+} else {
+  render_highquality(filename = mtn_raw,
+                     samples = hq_samples,
+                     width = out_width, height = out_height,
+                     lightdirection = 225, lightaltitude = 40,
+                     lightintensity = 650, lightcolor = "white",
+                     interactive = FALSE, preview = FALSE)
+
+  add_legend(mtn_raw,
+             file.path(fig_dir, paste0("catchment_3d_mountain_", drape, ".png")),
+             credit = paste0("Elevation: USGS 3DEP via AWS Terrain Tiles. ",
+                             if (drape == "imagery") "Imagery: Esri World Imagery."
+                             else "Shaded relief from the DEM."))
+}
+
+```
+
+# 6. Orbit animation (optional)
+
+An orbit around the basin view for presentations. `render_movie()` captures the
+rgl window, so it needs an interactive session with XQuartz.
+
+```{r basin_movie, eval = FALSE}
+
+plot_3d(tex_basin, elmat_basin, zscale = zscale_plot,
+        solid = TRUE, shadow = TRUE, background = "white",
+        windowsize = c(1400, 950))
+render_movie(filename = file.path(fig_dir, "catchment_3d_basin_orbit.mp4"),
+             type = "orbit", frames = 360, fps = 30,
+             phi = cam_basin$phi, zoom = cam_basin$zoom, fov = cam_basin$fov)
+
+```
