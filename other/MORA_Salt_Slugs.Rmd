@@ -1,0 +1,966 @@
+---
+title: "run_MORA_salt_slugs"
+author: "K. Cognac"
+date: "2026-09-09"
+output:
+  html_document:
+    code_folding: hide
+---
+
+This rmd processes slug test data collected along Edith Creek and the Paradise
+River at Mount Rainier during September 2026. The workflow can be easily adapted
+to other sites, but it is written specifically for the Mount Rainier effort.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      tidy = FALSE) 
+
+```
+
+```{r, , include = FALSE}
+# Read in required packages using setup script
+#source("setup.R")
+
+# Alt - Listing packages for sharing code
+library("rmarkdown")
+library("knitr")
+library("janitor")
+library("tools")
+library("stringr")
+library("dplyr")
+library("tidyverse")
+
+```
+
+```{r define_slug_functions}
+
+# ---------------------------------------------------------------------------- #
+# Salt slug test analysis
+# Written for AquaTROLL 200 and 600 output logs
+# Methods from:
+# Moore, R. D. (2005). Slug injection using salt in solution.
+# Streamline Watershed Management Bulletin, 8(2), 1-6.
+# ---------------------------------------------------------------------------- #
+
+#' Read a logger CSV, auto-detecting how many header lines to skip
+#'
+#' AquaTROLL 200/600 exports carry a variable number of metadata lines
+#' before the real header row. That header row's first column is always
+#' some form of a timestamp field ("Date Time", "Time", any case), so this
+#' scans for it instead of relying on a hard-coded `skip` count. Matching
+#' requires the field to be followed by a comma, so metadata lines that
+#' merely mention "time" (e.g. a "Time Zone: ..." line) aren't mistaken
+#' for the header.
+#'
+#' @param file_path Path to the logger CSV.
+#' @param max_header_lines Number of lines to scan while looking for the
+#'   header row. Defaults to 100; raise it if a logger ever ships with a
+#'   longer metadata block.
+#'
+#' @return A tibble, as from `read_csv()`.
+read_slug_log <- function(file_path, max_header_lines = 100) {
+
+  header_scan <- read_lines(file_path, n_max = max_header_lines)
+  header_row <- which(str_detect(
+    header_scan,
+    regex('^"?\\s*(date\\s*time|time)\\s*"?\\s*,', ignore_case = TRUE)
+  ))[1]
+
+  if (is.na(header_row)) {
+    stop(str_glue(
+      "Couldn't find a header row starting with a \"Date Time\" or \"Time\" column in the ",
+      "first {max_header_lines} lines of {file_path}. Try increasing `max_header_lines`."
+    ))
+  }
+
+  read_csv(file_path, skip = header_row - 1, show_col_types = FALSE)
+}
+
+#' Derive a log name from a file path
+#'
+#' Takes whatever is after the last "/" and before the ".csv", e.g.
+#' "data/.../SpringCreek_AT200_Slug1_ActualCond_output.csv" becomes
+#' "SpringCreek_AT200_Slug1_ActualCond_output".
+#'
+#' @param file_path Path to the logger CSV.
+#'
+#' @return A single string.
+get_log_name <- function(file_path) {
+  tools::file_path_sans_ext(basename(file_path))
+}
+
+#' Derive slug mass (grams) from a file name
+#'
+#' Files are named so the segment after the final "_" and before ".csv"
+#' is the salt mass in grams, e.g. "at200_slug1_400.csv" -> 400.
+#'
+#' @param file_path Path to the logger CSV.
+#'
+#' @return The slug mass, in grams, as a number.
+get_slug_mass_from_filename <- function(file_path) {
+  log_name <- get_log_name(file_path)
+  mass_str <- str_extract(log_name, "[^_]+$")
+  mass <- suppressWarnings(as.numeric(mass_str))
+
+  if (is.na(mass)) {
+    stop(str_glue(
+      "Couldn't parse a slug mass from the end of \"{log_name}\" (got \"{mass_str}\"). ",
+      "Pass `slug_mass` directly instead."
+    ))
+  }
+
+  mass
+}
+
+#' Find the timestamp column in a cleaned data frame
+#'
+#' Matches a column named exactly "time" or "date_time" (post
+#' `janitor::clean_names()`), case-insensitively.
+#'
+#' @param data A data frame that has already been through `clean_names()`.
+#'
+#' @return The matching column name, as a string.
+get_time_column <- function(data) {
+  matches <- names(data)[str_detect(names(data), regex("^(date_)?time$", ignore_case = TRUE))]
+
+  if (length(matches) == 0) {
+    stop(str_glue(
+      "No time column found (expected \"time\" or \"date_time\"). ",
+      "Available columns: {str_c(names(data), collapse = ', ')}"
+    ))
+  }
+
+  matches[1]
+}
+
+#' Find a conductivity column in a cleaned data frame
+#'
+#' AquaTROLL exports carry both an "Actual Conductivity" and a "Specific
+#' Conductivity" column, and `janitor::clean_names()` appends the sensor's
+#' units and serial number to each (e.g. "actual_conductivity_m_s_cm_1351721").
+#' That suffix varies by logger, so this matches on the required prefix only
+#' — it works whether or not units are listed and regardless of the serial
+#' number.
+#'
+#' @param data A data frame that has already been through `clean_names()`.
+#' @param cond_type Which conductivity column to use: "specific_conductivity"
+#'   (temperature-compensated) or "actual_conductivity" (raw reading).
+#'
+#' @return The matching column name, as a string.
+select_cond_column <- function(data, cond_type = c("specific_conductivity", "actual_conductivity")) {
+  cond_type <- match.arg(cond_type)
+
+  matches <- names(data)[str_detect(names(data), regex(str_c("^", cond_type), ignore_case = TRUE))]
+
+  if (length(matches) == 0) {
+    stop(str_glue(
+      "No column starting with \"{cond_type}\" found. ",
+      "Available columns: {str_c(names(data), collapse = ', ')}"
+    ))
+  }
+  if (length(matches) > 1) {
+    warning(str_glue(
+      "Multiple columns start with \"{cond_type}\": {str_c(matches, collapse = ', ')}. ",
+      "Using the first: {matches[1]}"
+    ))
+  }
+
+  matches[1]
+}
+
+#' Detect background conductivity from the pre-breakthrough baseline
+#'
+#' Walks through the record and, for each point, compares it to the mean
+#' and SD of every point that came before it. The breakthrough is flagged
+#' at the first point that rises above that running baseline by more than
+#' `threshold_sd` SDs (or `min_rise` uS/cm, whichever is larger, so a
+#' near-zero baseline SD can't trigger a false positive on tiny noise).
+#' Background conductivity is then the mean of everything before that point.
+#'
+#' @param data Data frame with `time` and `cond` columns (already cleaned).
+#' @param min_baseline_n Minimum number of points required before
+#'   breakthrough can be flagged. Defaults to 30.
+#' @param threshold_sd Number of baseline SDs a point must exceed to count
+#'   as the start of breakthrough. Defaults to 6.
+#' @param min_rise Minimum absolute rise (uS/cm) above baseline required,
+#'   regardless of SD. Defaults to 5.
+#'
+#' @return A list with `bck_cond`, `breakthrough_row`, and `breakthrough_time`.
+detect_bck_cond <- function(data, min_baseline_n = 30, threshold_sd = 6, min_rise = 5) {
+
+  baseline_check <- data %>%
+    mutate(
+      row_id = row_number(),
+      cum_mean = cummean(cond),
+      cum_sumsq = cumsum(cond^2),
+      cum_var = (cum_sumsq - row_id * cum_mean^2) / pmax(row_id - 1, 1),  # sample variance
+      cum_sd = sqrt(pmax(cum_var, 0)),
+      baseline_mean = lag(cum_mean),   # mean of all points BEFORE this row
+      baseline_sd = lag(cum_sd),       # sd of all points BEFORE this row
+      rise_threshold = pmax(threshold_sd * baseline_sd, min_rise),
+      is_rise = row_id > min_baseline_n & cond > (baseline_mean + rise_threshold)
+    )
+
+  breakthrough_row <- which(baseline_check$is_rise)[1]
+
+  if (is.na(breakthrough_row)) {
+    stop("No breakthrough detected in the data — check the log, or loosen `threshold_sd`/`min_rise`.")
+  }
+
+  list(
+    bck_cond = baseline_check$baseline_mean[breakthrough_row],
+    breakthrough_row = breakthrough_row,
+    breakthrough_time = baseline_check$time[breakthrough_row]
+  )
+}
+
+#' Run a salt slug discharge calculation
+#'
+#' Subtracts background conductivity, integrates the breakthrough curve
+#' with the trapezoidal rule, and solves for streamflow discharge. Because
+#' the correction factor enters the calculation as a simple multiplier,
+#' discharge is inversely proportional to it — a higher correction factor
+#' concentrates more mass per uS/cm and yields a lower discharge estimate.
+#' That relationship is used below to turn a +/- range on the correction
+#' factor into a discharge range without re-running the integration.
+#'
+#' @param data Raw logger data frame (e.g. from `read_slug_log()`). Must
+#'   contain a time column and a conductivity column matching `cond_type`.
+#' @param slug_mass Mass of salt injected, in grams. Leave as NULL (default)
+#'   to auto-detect it from `file_path`'s file name (the segment after the
+#'   final "_" and before ".csv", e.g. "..._400.csv" -> 400); pass a number
+#'   to override auto-detection with a manually assigned mass.
+#' @param file_path Path to the source CSV, used to auto-detect `slug_mass`
+#'   when it isn't supplied directly. Not needed if `slug_mass` is given.
+#' @param cond_type Which conductivity column to use: "specific_conductivity"
+#'   (temperature-compensated, the default) or "actual_conductivity" (raw
+#'   reading). Matched flexibly against the column names — see
+#'   `select_cond_column()`.
+#' @param bck_cond Background specific conductivity, in uS/cm. Leave as NULL
+#'   (default) to auto-detect it from the stable period before breakthrough;
+#'   pass a number to override auto-detection with a manually read value.
+#' @param correction_factor Best-estimate conductivity-to-concentration
+#'   correction factor (uS/cm -> mg/L). Defaults to 0.5.
+#' @param correction_factor_range Uncertainty on `correction_factor`, used to
+#'   compute a discharge range. Either a single number for a symmetric +/-
+#'   offset (e.g. 0.02 for 0.5 +/- 0.02), or a length-2 vector giving explicit
+#'   low/high correction factors (e.g. c(0.47, 0.53)). Leave NULL (default)
+#'   to skip the range and report only a point estimate.
+#' @param dt Logger interval, in seconds. Defaults to 1.
+#' @param min_baseline_n,threshold_sd,min_rise Passed to `detect_bck_cond()`
+#'   when `bck_cond` is not supplied.
+#'
+#' @return A list with:
+#'   sensor_data: the cleaned data frame with concentration and
+#'     integration columns added (at the point-estimate correction factor)
+#'   discharge_Ls, discharge_cfs: point-estimate discharge, in L/s and ft3/s
+#'   discharge_range_Ls, discharge_range_cfs: length-2 low/high discharge
+#'     range (NULL if correction_factor_range was not supplied)
+#'   correction_factor, correction_factor_range: the correction factor(s) used
+#'   cond_type: the conductivity type used
+#'   slug_mass: the slug mass used, in grams (detected or supplied)
+#'   bck_cond: the background conductivity used (detected or supplied)
+#'   breakthrough_time: time breakthrough was detected (NA if bck_cond
+#'     was supplied manually)
+run_salt_slug <- function(data, slug_mass = NULL, file_path = NULL,
+                           cond_type = c("specific_conductivity", "actual_conductivity"),
+                           bck_cond = NULL, correction_factor = 0.5,
+                           correction_factor_range = NULL, dt = 1,
+                           min_baseline_n = 30, threshold_sd = 6, min_rise = 5) {
+
+  cond_type <- match.arg(cond_type)
+
+  if (is.null(slug_mass)) {
+    if (is.null(file_path)) {
+      stop("Provide either `slug_mass` directly, or `file_path` so it can be auto-detected from the file name.")
+    }
+    slug_mass <- get_slug_mass_from_filename(file_path)
+  }
+
+  cleaned_data <- data %>% janitor::clean_names()
+  time_col <- get_time_column(cleaned_data)
+  cond_col <- select_cond_column(cleaned_data, cond_type)
+
+  sensor_data <- cleaned_data %>%
+    select(time = all_of(time_col), cond = all_of(cond_col))
+
+  breakthrough_time <- as.POSIXct(NA)
+  if (is.null(bck_cond)) {
+    baseline <- detect_bck_cond(sensor_data, min_baseline_n = min_baseline_n,
+                                 threshold_sd = threshold_sd, min_rise = min_rise)
+    bck_cond <- baseline$bck_cond
+    breakthrough_time <- baseline$breakthrough_time
+  }
+
+  sensor_data <- sensor_data %>%
+    mutate(
+      dt = dt,
+      conc_bck_corr = if_else(cond > bck_cond, cond - bck_cond, 0),                     # uS/cm above background
+      corr_dt = if_else(row_number() == 1, 0, (conc_bck_corr + lag(conc_bck_corr)) / 2 * dt), # trapezoidal rule, uS*s/cm (correction-factor independent)
+      conc_mgl = conc_bck_corr * correction_factor,                                     # uS/cm -> mg/L, at point-estimate correction factor
+      concdt = if_else(row_number() == 1, 0, (conc_mgl + lag(conc_mgl)) / 2 * dt)       # trapezoidal rule, mg*s/L
+    )
+
+  sum_corr_dt <- sum(sensor_data$corr_dt)  # uS*s/cm, independent of correction factor
+
+  # discharge (L/s) as a function of correction factor: slug_mass (g) / (sum_corr_dt * cf / 1000) (g*s/L)
+  discharge_for_cf <- function(cf) slug_mass / (sum_corr_dt * cf / 1000)
+
+  discharge_Ls <- discharge_for_cf(correction_factor)
+
+  cf_bounds <- NULL
+  discharge_range_Ls <- NULL
+  if (!is.null(correction_factor_range)) {
+    cf_bounds <- if (length(correction_factor_range) == 1) {
+      correction_factor + c(-1, 1) * correction_factor_range
+    } else {
+      range(correction_factor_range)
+    }
+    discharge_range_Ls <- sort(discharge_for_cf(cf_bounds))  # lower cf -> higher discharge
+  }
+
+  ls_to_cfs <- 0.0353147  # L/s -> ft3/s
+  discharge_cfs <- discharge_Ls * ls_to_cfs
+  discharge_range_cfs <- if (!is.null(discharge_range_Ls)) discharge_range_Ls * ls_to_cfs else NULL
+
+  list(
+    sensor_data = sensor_data,
+    discharge_Ls = discharge_Ls,
+    discharge_cfs = discharge_cfs,
+    discharge_range_Ls = discharge_range_Ls,
+    discharge_range_cfs = discharge_range_cfs,
+    correction_factor = correction_factor,
+    correction_factor_range = cf_bounds,
+    cond_type = cond_type,
+    slug_mass = slug_mass,
+    bck_cond = bck_cond,
+    breakthrough_time = breakthrough_time
+  )
+}
+
+#' Format a discharge label in L/s and ft3/s, with an optional range
+#'
+#' @param discharge_Ls,discharge_cfs Point-estimate discharge, in L/s and ft3/s.
+#' @param discharge_range_Ls,discharge_range_cfs Optional length-2 low/high
+#'   discharge ranges, in L/s and ft3/s. Leave NULL to omit the range.
+#'
+#' @return A single formatted string.
+format_discharge_label <- function(discharge_Ls, discharge_cfs,
+                                    discharge_range_Ls = NULL, discharge_range_cfs = NULL) {
+  ls_txt <- sprintf("%.3f L/s", discharge_Ls)
+  cfs_txt <- sprintf("%.3f ft³/s", discharge_cfs)
+
+  if (!is.null(discharge_range_Ls)) {
+    ls_txt <- str_glue("{ls_txt} ({sprintf('%.3f', discharge_range_Ls[1])}–{sprintf('%.3f', discharge_range_Ls[2])})")
+    cfs_txt <- str_glue("{cfs_txt} ({sprintf('%.3f', discharge_range_cfs[1])}–{sprintf('%.3f', discharge_range_cfs[2])})")
+  }
+
+  str_glue("{ls_txt}   |   {cfs_txt}")
+}
+
+#' Plot a salt slug breakthrough curve
+#'
+#' @param sensor_data Data frame from run_salt_slug()$sensor_data.
+#' @param bck_cond Background specific conductivity, in uS/cm.
+#' @param discharge_Ls,discharge_cfs Point-estimate discharge, in L/s and
+#'   ft3/s (shown in the plot subtitle).
+#' @param log_name Site/log name, used in the plot title.
+#' @param breakthrough_time Optional; time breakthrough was detected. Drawn
+#'   as a vertical line if supplied and not NA.
+#' @param discharge_range_Ls,discharge_range_cfs Optional length-2 low/high
+#'   discharge ranges, in L/s and ft3/s, shown alongside the point estimate.
+#' @param cond_type Optional; which conductivity column was used (e.g.
+#'   "specific_conductivity"). Appended to the title if supplied, so plots
+#'   from the same log run under different `cond_type`s are distinguishable.
+#'
+#' @return A ggplot object.
+plot_breakthrough <- function(sensor_data, bck_cond, discharge_Ls, discharge_cfs, log_name,
+                               breakthrough_time = NA,
+                               discharge_range_Ls = NULL, discharge_range_cfs = NULL,
+                               cond_type = NULL) {
+  p <- ggplot(sensor_data, aes(x = time, y = cond)) +
+    geom_line() +
+    geom_hline(yintercept = bck_cond, linetype = "dashed", color = "red")
+
+  if (!is.na(breakthrough_time)) {
+    p <- p + geom_vline(xintercept = breakthrough_time, linetype = "dotted", color = "blue")
+  }
+
+  plot_title <- if (!is.null(cond_type)) str_glue("{log_name} ({cond_type})") else log_name
+
+  p +
+    labs(
+      y = expression(paste("Specific Conductivity (", mu, "S/cm)")),
+      title = plot_title,
+      subtitle = format_discharge_label(discharge_Ls, discharge_cfs, discharge_range_Ls, discharge_range_cfs)
+    ) +
+    theme_bw()
+}
+
+#' Run salt slug analysis on every CSV in a folder
+#'
+#' Loops over every .csv file in `folder_path`, runs `read_slug_log()` and
+#' `run_salt_slug()` on each with a shared slug mass / correction factor,
+#' and returns one summary row per file. A file that fails (e.g. no
+#' breakthrough detected, or no correction factor found) doesn't stop the
+#' batch — its `error` column is filled in and the rest continue. Optionally
+#' saves each file's breakthrough plot and processed sensor data, same as a
+#' single run.
+#'
+#' @param folder_path Folder containing the logger CSVs.
+#' @param slug_mass Mass of salt injected, in grams. Leave as NULL (default)
+#'   to auto-detect it per file from each file name (the segment after the
+#'   final "_" and before ".csv"); pass a number to use that fixed mass for
+#'   every file instead, overriding auto-detection.
+#' @param cond_type Which conductivity column to use: "specific_conductivity"
+#'   (default) or "actual_conductivity". Passed through to `run_salt_slug()`.
+#' @param correction_factor,correction_factor_range Fixed values passed to
+#'   `run_salt_slug()` for every file. Ignored for a given file if
+#'   `correction_factor_lookup` is supplied and returns a value for it.
+#' @param correction_factor_lookup Optional function taking a `file_path`
+#'   and returning `list(correction_factor = ..., correction_factor_range = ...)`
+#'   — e.g. a per-site/probe lookup against a correction factor table. When
+#'   supplied, its result overrides `correction_factor`/`correction_factor_range`
+#'   for that file. Leave NULL to use the fixed values for every file.
+#' @param dt,min_baseline_n,threshold_sd,min_rise Passed through to
+#'   `run_salt_slug()` for every file.
+#' @param save_outputs If TRUE (default), saves a breakthrough plot and
+#'   sensor data CSV per log, named with `get_log_name()` and `cond_type`
+#'   (so runs on the same file with different `cond_type`s don't overwrite
+#'   each other).
+#' @param output_dir Folder to save per-file outputs to, if `save_outputs`
+#'   is TRUE. Defaults to `folder_path`.
+#'
+#' @return A tibble with one row per file: log_name, file_path, cond_type,
+#'   slug_mass, correction_factor, bck_cond, discharge_Ls, discharge_cfs,
+#'   discharge_cfs_low, discharge_cfs_high, and error (NA unless that file failed).
+run_slug_batch <- function(folder_path, slug_mass = NULL,
+                            cond_type = c("specific_conductivity", "actual_conductivity"),
+                            correction_factor = 0.5, correction_factor_range = NULL,
+                            correction_factor_lookup = NULL,
+                            dt = 1, min_baseline_n = 30, threshold_sd = 6, min_rise = 5,
+                            save_outputs = TRUE, output_dir = folder_path) {
+
+  cond_type <- match.arg(cond_type)
+
+  file_paths <- list.files(folder_path, pattern = "\\.csv$", full.names = TRUE)
+
+  if (length(file_paths) == 0) {
+    stop(str_glue("No .csv files found in {folder_path}"))
+  }
+
+  map_dfr(file_paths, function(file_path) {
+    log_name <- get_log_name(file_path)
+
+    tryCatch({
+      # Per-file correction factor override, if a lookup function was supplied
+      cf <- correction_factor
+      cf_range <- correction_factor_range
+      if (!is.null(correction_factor_lookup)) {
+        looked_up <- correction_factor_lookup(file_path)
+        cf <- looked_up$correction_factor
+        cf_range <- looked_up$correction_factor_range
+      }
+
+      raw_data <- read_slug_log(file_path)
+
+      result <- run_salt_slug(
+        data = raw_data,
+        slug_mass = slug_mass,  # NULL -> auto-detected from this file's name
+        file_path = file_path,
+        cond_type = cond_type,
+        correction_factor = cf,
+        correction_factor_range = cf_range,
+        dt = dt,
+        min_baseline_n = min_baseline_n,
+        threshold_sd = threshold_sd,
+        min_rise = min_rise
+      )
+
+      if (save_outputs) {
+        breakthrough_curve <- plot_breakthrough(
+          result$sensor_data, result$bck_cond, result$discharge_Ls, result$discharge_cfs, log_name,
+          breakthrough_time = result$breakthrough_time,
+          discharge_range_Ls = result$discharge_range_Ls,
+          discharge_range_cfs = result$discharge_range_cfs,
+          cond_type = cond_type
+        )
+        ggsave(file.path(output_dir, str_glue("{log_name}_{cond_type}_breakthrough_curve.png")),
+               plot = breakthrough_curve, width = 8, height = 5, dpi = 300)
+        write_csv(result$sensor_data, file.path(output_dir, str_glue("{log_name}_{cond_type}_sensor_data.csv")))
+      }
+
+      tibble(
+        log_name = log_name,
+        file_path = file_path,
+        cond_type = cond_type,
+        slug_mass = result$slug_mass,
+        correction_factor = result$correction_factor,
+        bck_cond = result$bck_cond,
+        discharge_Ls = result$discharge_Ls,
+        discharge_cfs = result$discharge_cfs,
+        discharge_cfs_low = if (!is.null(result$discharge_range_cfs)) result$discharge_range_cfs[1] else NA_real_,
+        discharge_cfs_high = if (!is.null(result$discharge_range_cfs)) result$discharge_range_cfs[2] else NA_real_,
+        error = NA_character_
+      )
+    }, error = function(e) {
+      tibble(
+        log_name = log_name,
+        file_path = file_path,
+        cond_type = cond_type,
+        slug_mass = NA_real_,
+        correction_factor = NA_real_,
+        bck_cond = NA_real_,
+        discharge_Ls = NA_real_,
+        discharge_cfs = NA_real_,
+        discharge_cfs_low = NA_real_,
+        discharge_cfs_high = NA_real_,
+        error = conditionMessage(e)
+      )
+    })
+  })
+}
+
+
+# Function to extract metadata from file header and filename components
+extract_device_info <- function(file_path) {
+  # Read text lines safely
+  lines <- read_lines(file_path, progress = FALSE)
+  
+  # Find matching header lines for SN and Model
+  sn_line <- lines %>% 
+    str_subset("Device SN\\s*=") %>% 
+    pluck(1, .default = NA_character_)
+  
+  model_line <- lines %>% 
+    str_subset("Device Model\\s*=") %>% 
+    pluck(1, .default = NA_character_)
+  
+  # Skip file if no Device SN is present
+  if (is.na(sn_line)) {
+    return(tibble())
+  }
+  
+  # Extract serial number and model
+  sn_val <- sn_line %>% 
+    str_extract("Device SN\\s*=\\s*\"?([^\"]+)\"?", group = 1) %>% 
+    str_trim()
+  
+  model_val <- if (!is.na(model_line)) {
+    model_line %>% 
+      str_extract("Device Model\\s*=\\s*\"?([^\"]+)\"?", group = 1) %>% 
+      str_trim()
+  } else {
+    NA_character_
+  }
+  
+  # Parse filename components (e.g., "EC02_01_200.csv")
+  file_name_only <- basename(file_path)
+  
+  # Match: [site]_[slug_num]_[slug_vol].csv
+  parsed_name <- str_match(file_name_only, "^([^_]+)_([^_]+)_([^\\._]+)")
+  
+  site_name   <- parsed_name[1, 2]
+  slug_number <- parsed_name[1, 3]
+  slug_volume <- parsed_name[1, 4]
+  
+  tibble(
+    file_name   = file_name_only,
+    site_name   = site_name,
+    slug_number = slug_number,
+    slug_volume = slug_volume,
+    device_model = model_val,
+    device_sn   = sn_val
+  )
+}
+
+```
+
+
+First, we extract metadata from conductivity logs collected during salt slug 
+tests to construct a master table of all tests, sites, and instrument serial 
+number combinations. Note that all slug file names are stored as a .csv output
+with the file name format: SITENAME_SLUG#_SLUGVOL.csv. For example 
+"EC02_01_200.csv". The CSV is an output from an insitu logging device. Although
+various devices were used, they all use a similar metadata convention in the
+header lines, so information can be easily extracted. However, if you are using
+another brand of sensor, this part and related functions will need to be re-
+written or skipped.
+
+```{r get_serials}
+
+# Folder with csv slugs - note indiidual file name format should be:
+# [Site Name]_[Slug Test Num]_[Slug Salt Volume in Grams].csv
+
+
+folder_path <- "data/park/MORA/salt_slugs/MORA_Slugs_Sep1/"
+
+# Map over files and bind results directly
+device_summary <- list.files(
+  path = folder_path, 
+  pattern = "\\.csv$", 
+  full.names = TRUE,
+  ignore.case = TRUE
+) %>% 
+  map_df(extract_device_info) %>%
+  filter(!str_detect(file_name, "WQ"))
+
+# View
+device_summary %>%
+  kable(
+    caption = "Device Summary Overview",
+    digits = 2,
+    col.names = gsub("_", " ", names(device_summary)) %>% stringr::str_to_title()
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    position = "center",
+    font_size = 14
+  ) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2C3E50") # Custom dark header
+
+
+# Print shorter summary table for unique combination of correction factor tests
+#device_summary %>% 
+#  filter(!str_detect(file_name, "WQ")) %>% 
+#  group_by(site_name, device_sn) %>% 
+#  slice_head(n = 1) %>% 
+#  ungroup() %>% 
+#  view()
+
+```
+
+For each unique SC instrument and salt slug location combination, a correction 
+factor is now calculated using a field water sample, the SC probe, and progressive 
+addition of a known volume and concentration of a salt solution. The salt
+solution was prepared using distilled water and an added mass of dry table salt 
+(NaCl). The correction factor was then calculated as the slope of the effective
+change in concentration on the y-axis and specific conductivity on the x-axis.
+
+```{r read_correction_factors}
+
+# Read in csv with correction factors. At minimum, should include columns:
+# probe_sn, site, mg/L (cumulative mg added / total sample vol + solution added vol),
+# and SC_us_cm (SC at that added solution.)
+
+corr_dat <- read_csv("data/park/MORA/salt_slugs/correction_factors.csv") %>%
+  dplyr::mutate(site_probe = paste0(site, "_", probe_sn))
+
+# Calculate slope and R2 for each site_probe combination and add as columns
+corr_dat <- corr_dat %>%
+  group_by(site_probe) %>%
+  dplyr::mutate(
+    # Extract slope coefficient from linear model
+    slope = coef(lm(`mg/L`~ SC_us_cm))[2],
+    # Extract R-squared value from linear model summary
+    r_squared = summary(lm(`mg/L` ~ SC_us_cm))$r.squared
+  ) %>%
+  ungroup()
+
+# Compute regression stats per group for annotations
+label_dat <- corr_dat %>%
+  group_by(site_probe) %>%
+  summarize(
+    fit = list(lm(`mg/L` ~ SC_us_cm)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    slope = map_dbl(fit, ~ coef(.x)[2]),
+    intercept = map_dbl(fit, ~ coef(.x)[1]),
+    r2 = map_dbl(fit, ~ summary(.x)$r.squared),
+    eq_label = sprintf("y = %.2fx + %.2f\nR² = %.3f", slope, intercept, r2)
+  )
+
+# Determine coordinates for placing text labels near top-left of each facet
+coord_dat <- corr_dat %>%
+  group_by(site_probe) %>%
+  summarize(
+    y_pos = max(`mg/L`, na.rm = TRUE),
+    x_pos = min(SC_us_cm, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(label_dat, by = "site_probe")
+
+
+# Plot with facet_wrap and custom labels
+ggplot(corr_dat, aes(y = `mg/L`, x = SC_us_cm)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "black", lwd = .25) +
+  geom_text(
+    data = coord_dat,
+    aes(x = x_pos, y = y_pos, label = eq_label),
+    hjust = 0, vjust = 1, size = 3.5, inherit.aes = FALSE
+  ) +
+  facet_wrap(~ site_probe, scales = "free") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# join corr_dat to device_summary to get a k_factor for each file name
+
+device_summary <- device_summary %>%
+  left_join(corr_dat %>% 
+              mutate(probe_sn = as.character(probe_sn)) %>%
+              group_by(site, probe_sn) %>%
+              dplyr::summarize(slope = mean(slope)) %>%
+              select(site, probe_sn, slope) , 
+            by = c("site_name" = "site", 
+                   "device_sn" = "probe_sn")) 
+```
+
+```{r correction_table}
+# view table of correlation data results
+corr_dat %>%
+  kable(
+    caption = "Correction Factor Summary",
+    digits = 2,
+    col.names = gsub("_", " ", names(corr_dat)) %>% stringr::str_to_title()
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    position = "center",
+    font_size = 14
+  ) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2C3E50") # Custom dark
+
+```
+
+Now, we run an individual slug test to show how the code works. We observe a 
+classic breakthrough curve. The function automatically determrines the background
+concentration. Note that slug mass can be adjusted here, but if left NULL, it is
+read automatically from the file name.
+
+```{r run_ind_test}
+
+# Update file path to change test
+
+file_path <- "data/park/MORA/salt_slugs/MORA_Slugs_Sep1/PR04_01_600.csv"
+log_name  <- get_log_name(file_path)  # whatever's after the last "/" and before ".csv"
+
+# Salt mass (grams) is auto-detected from the file name — the segment
+# after the final "_" and before ".csv" (e.g. "..._400.csv" -> 400 g).
+# To override with a manually assigned mass instead, set a number here:
+# slug_mass <- 400
+slug_mass <- NULL
+
+dt <- 1  # logger interval, seconds (should always be 1 sec before the slug)
+
+# Which conductivity column to use: "specific_conductivity" (temperature-
+# compensated) or "actual_conductivity" (raw reading). Matched flexibly
+# against the column names, so it's fine if units or the sensor serial
+# number in the column name differ between loggers.
+cond_type <- "specific_conductivity"
+
+# Background conductivity is auto-detected from the stable period before
+# breakthrough. To override with a manually read value instead, set:
+# bck_cond <- 597
+
+# Correction factor +/- range (uS/cm -> mg/L uncertainty). Set to NULL to
+# report only the point estimate. Can also be a specific low/high pair,
+# e.g. c(0.47, 0.53).
+correction_factor       <- device_summary %>%
+                            filter(file_name == paste0(log_name,".csv")) %>%
+                          pull(slope)
+
+correction_factor_range <- c(correction_factor * 0.95, correction_factor * 1.05)#c(0.41, 0.47)
+
+# ---------------------------------------------------------------------------- #
+# Run
+# ---------------------------------------------------------------------------- #
+raw_data <- read_slug_log(file_path)
+
+result <- run_salt_slug(
+  data = raw_data,
+  slug_mass = slug_mass,   # NULL -> auto-detected from file_path's file name
+  file_path = file_path,
+  cond_type = cond_type,
+  correction_factor = correction_factor,
+  correction_factor_range = correction_factor_range,
+  dt = dt
+  # bck_cond = bck_cond   # uncomment to override auto-detection
+)
+
+sensor_data          <- result$sensor_data
+discharge_Ls         <- result$discharge_Ls
+discharge_cfs        <- result$discharge_cfs
+discharge_range_Ls   <- result$discharge_range_Ls
+discharge_range_cfs  <- result$discharge_range_cfs
+bck_cond             <- result$bck_cond
+breakthrough_time    <- result$breakthrough_time
+
+cat(str_glue("Slug mass used: {result$slug_mass} g\n"))
+cat(str_glue("Detected background conductivity: {round(bck_cond, 1)} uS/cm\n"))
+cat(str_glue("Breakthrough started at: {breakthrough_time}\n"))
+cat(str_glue("Discharge: {format_discharge_label(discharge_Ls, discharge_cfs, discharge_range_Ls, discharge_range_cfs)}\n"))
+
+breakthrough_curve <- plot_breakthrough(
+  sensor_data, bck_cond, discharge_Ls, discharge_cfs, log_name,
+  breakthrough_time = breakthrough_time,
+  discharge_range_Ls = discharge_range_Ls,
+  discharge_range_cfs = discharge_range_cfs,
+  cond_type = cond_type
+)
+breakthrough_curve
+
+# ---------------------------------------------------------------------------- #
+# Save outputs
+# ---------------------------------------------------------------------------- #
+#ggsave(str_glue("{log_name}_breakthrough_curve.png"), plot = breakthrough_curve,
+#       width = 8, height = 5, dpi = 300)
+#write_csv(sensor_data, str_glue("{log_name}_sensor_data.csv"))
+
+
+```
+
+Now, we'll batch run the test for all salt slugs. We'll use correction factors
+calculated above for each test.
+
+```{r batch_slugs, warning = FALSE, message = FALSE}
+
+# ---------------------------------------------------------------------------- #
+# Batch: run every slug test in a folder, once per conductivity type,
+# using each file's own site/probe correction factor
+# ---------------------------------------------------------------------------- #
+slug_folder <- "data/park/MORA/salt_slugs/MORA_Slugs_Sep1/"
+
+# Look up this file's correction factor (and a +/-5% range) from device_summary
+get_site_correction_factor <- function(file_path) {
+  target_file_name <- basename(file_path)
+
+  cf <- device_summary %>%
+    filter(file_name == target_file_name) %>%
+    pull(slope)
+
+  if (length(cf) == 0 || all(is.na(cf))) {
+    stop(str_glue("No correction factor found for {target_file_name} in device_summary."))
+  }
+  if (length(cf) > 1) {
+    warning(str_glue("Multiple correction factors found for {target_file_name}; using the first."))
+    cf <- cf[1]
+  }
+
+  list(
+    correction_factor = cf,
+    correction_factor_range = c(cf * 0.95, cf * 1.05)
+  )
+}
+
+slug_summary <- map_dfr(
+  c("specific_conductivity"), # "actual_conductivity"),
+  ~ run_slug_batch(
+      folder_path = slug_folder,
+      output_dir = paste0(slug_folder, "outputs/"),
+      slug_mass = slug_mass,
+      cond_type = .x,
+      correction_factor_lookup = get_site_correction_factor,
+      dt = dt
+    )
+)
+# save results
+write_csv(slug_summary, paste0(slug_folder, "slug_summary_results.csv"))
+
+# print table
+slug_summary %>%
+  drop_na(bck_cond) %>%
+  select(-file_path) %>%
+  kable(
+    caption = "Slug Summary",
+    digits = 2,
+    col.names = gsub("_", " ", names(slug_summary %>% select(-file_path))) %>% stringr::str_to_title()
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    position = "center",
+    font_size = 14
+  ) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2C3E50") # Custom dark
+
+```
+
+Plot results from individual tests.
+
+```{r plot_all}
+ggplot(slug_summary %>% drop_na(discharge_cfs) %>% dplyr::filter(cond_type == "specific_conductivity"), 
+       aes(x = as.factor(log_name), 
+           y = discharge_cfs, 
+           ymin = discharge_cfs_low, 
+           ymax = discharge_cfs_high, 
+           color = as.factor(log_name))) +
+  geom_errorbar(width = 0.3, linewidth = 0.7) +
+  geom_point(size = 2.5) +
+  scale_color_manual("", values = c("pink","pink", "pink", "pink",
+                                    "hotpink","hotpink",
+                                    "dodgerblue","dodgerblue","dodgerblue",
+                                    "#2395","#2395","#2395",
+                                    "orange","orange","orange",
+                                    "seagreen","seagreen","seagreen",
+                                    "navy","navy","navy",
+                                    "tomato","tomato","tomato","tomato",
+                                    "purple","purple","purple",
+                                    "tan","tan","tan")) +
+  labs(
+    title = "Edith Creek (EC) and Paradise River (PR) Salt Slugs September 2026",
+    subtitle = "range +/- 2% correction factor",
+    x = "",
+    y = "Discharge (cfs)") +
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+plot a boxplot summary for each site
+
+```{r plot_summary}
+# 1. Prepare data: extract site_name and combine discharge estimates into one column
+slug_site_summary <- slug_summary %>%
+  drop_na(discharge_cfs) %>%
+  dplyr::filter(cond_type == "specific_conductivity") %>%
+  # Extract everything before the first underscore (e.g., "EC01" from "EC01_01_600")
+  mutate(site_name = str_extract(log_name, "^[^_]+")) %>%
+  # Reshape low, main, and high values into a single column so geom_boxplot can calculate quartiles
+  pivot_longer(
+    cols = c(discharge_cfs_low, discharge_cfs, discharge_cfs_high),
+    names_to = "estimate_type",
+    values_to = "all_discharge_values"
+  )
+
+# 2. Plot overall boxplot per site
+ggarrange(
+ggplot(slug_site_summary, aes(x = as.factor(site_name), y = all_discharge_values, fill = as.factor(site_name))) +
+  geom_boxplot(alpha = 0.7, outlier.colour = "red", outlier.shape = 16) +
+  geom_jitter(width = 0.1, alpha = 0.5, size = 1.5) + # Optional: shows individual estimate points
+  labs(
+    #title = "Discharge Summary Range by Site",
+    x = "",
+    y = "Discharge (cfs)"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ),
+
+  ggplot(slug_site_summary, aes(x = as.factor(site_name), y = bck_cond, fill = as.factor(site_name))) +
+  geom_boxplot(alpha = 0.7, outlier.colour = "red", outlier.shape = 16) +
+  geom_jitter(width = 0.1, alpha = 0.5, size = 1.5) + # Optional: shows individual estimate points
+  labs(
+    #title = "Discharge Summary Range by Site",
+    x = "",
+    y = "Background SC (us/cm)"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ),
+nrow = 2)
+
+
+```

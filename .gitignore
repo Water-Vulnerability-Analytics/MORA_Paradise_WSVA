@@ -42,8 +42,24 @@ vignettes/*.pdf
 # pkgdown site
 docs/
 
+# project data
+data
+data/
+
 # translation temp files
 po/*~
 
 # RStudio Connect folder
 rsconnect/
+.positai
+
+# Specific files
+Reports/*.docx
+
+# OS and working files
+.DS_Store
+*.bak*
+Reports/*.md
+
+# Base R graphics output from non-interactive runs
+Rplots.pdf

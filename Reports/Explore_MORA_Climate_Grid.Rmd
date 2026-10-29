@@ -1,0 +1,444 @@
+---
+title: "Explore_MORA_Climate_Grid"
+author: "KEC"
+date: "2026-10-09"
+output: html_document
+---
+
+This R markdown documents how the GridMET cells used in the Paradise water
+balance model (WBM) were chosen. It runs the WBM for all six cells covering the
+buffered contributing area, compares them, and records the two cells retained.
+The selection rule itself lives in `src/select_climate_cells.R`, which
+`MORA_Deep_Dive_workflow.Rmd` uses to filter its climate inputs.
+
+# 1. Setup
+
+```{r setup}
+
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      eval = TRUE)
+
+# This Rmd lives in Reports/, but all paths (data/, src/, setup.R) are relative
+# to the project root. root.dir applies from the next chunk on.
+knitr::opts_knit$set(root.dir = here::here())
+
+# Packages, src/ functions, palette, plot theme, analysis windows, and CRS are
+# shared with MORA_Deep_Dive_workflow.Rmd.
+source(here::here("Reports/report_setup.R"))
+
+park <- "MORA"
+
+# Hock degree-day melt coefficient used for all WBM runs in this assessment
+hock_coef <- 5
+
+```
+
+# 2. Inputs
+
+Contributing area: the current Edith Creek watershed, buffered 2 km, which
+defines the six GridMET cells evaluated here.
+
+```{r inputs_area}
+
+system_watershed <- st_read("data/park/MORA/edithcreek_watershed.gpkg", quiet = TRUE) %>%
+  st_transform(crs_use)
+
+contributing_area <- system_watershed %>%
+  st_buffer(2000)
+
+```
+
+GCMs available for the region, with skill ranking (used to download future
+climate and to label projections).
+
+```{r inputs_gcms}
+
+all_cfs <-
+  read_delim("https://raw.githubusercontent.com/rossyndicate/CCRP_automated_climate_futures/master/data/general/GCM_skill_by_region.txt") %>%
+  dplyr::filter(Region == "PWR") %>%
+  dplyr::mutate(GCM = ifelse(GCM == "HadGEM2-ES.", "HadGEM2-ES365.", GCM),
+                GCM = ifelse(GCM == "HadGEM2-CC.", "HadGEM2-CC365.", GCM)) %>%
+  tidyr::crossing(data.table(RCP = c("rcp45", "rcp85"))) %>%
+  dplyr::mutate(GCM = paste0(GCM, RCP)) %>%
+  dplyr::mutate(Skill = ifelse(Rank > 18, "Low Skill", "High Skill"))
+
+```
+
+Historical (GridMET) and future (MACA) climate for every cell. Downloads are
+slow, so they are cached; uncomment to rebuild.
+
+```{r inputs_climate}
+
+# clim_hist <- get_climate_historic(sf = contributing_area %>%
+#                                     dplyr::mutate(name = "contributing_area"),
+#                                   col_name = "name",
+#                                   start = "1979-01-01",
+#                                   end = "2026-09-20",
+#                                   exact = TRUE,
+#                                   return_grid = TRUE) %>%
+#   dplyr::mutate(CF = "Historical",
+#                 GCM = "GridMET")
+# saveRDS(clim_hist, "data/park/MORA/clim_hist_extra.rds")
+# saveRDS(aoi_gridmet_grid, "data/park/MORA/aoi_gridmet_grid_extra.rds")
+
+clim_hist <- readRDS("data/park/MORA/clim_hist_extra.rds") %>%
+  dplyr::mutate(x = round(x, 6),
+                y = round(y, 6))
+
+aoi_gridmet_grid <- readRDS("data/park/MORA/aoi_gridmet_grid_extra.rds")
+
+# One point per cell center
+clim_pts <- clim_hist %>%
+  dplyr::group_by(x, y, area_weight) %>%
+  dplyr::summarize(.groups = "drop") %>%
+  st_as_sf(coords = c("x", "y"), crs = 4326, remove = FALSE)
+
+# Takes > 1 hr
+# clim_fut <- get_climate_future(sf = contributing_area %>%
+#                                  dplyr::mutate(name = "contributing_area"),
+#                                col_name = "name",
+#                                start = "2026-01-01",
+#                                end = "2100-12-31",
+#                                GCM = all_cfs$GCM,
+#                                exact = TRUE,
+#                                gridmet_points = clim_pts) %>%
+#   dplyr::mutate(GCM = paste0(GCM, ".", RCP)) %>%
+#   dplyr::left_join(all_cfs %>% dplyr::select(-"RCP"), by = "GCM") %>%
+#   dplyr::select(-c("Ensemble", "RCP"))
+# saveRDS(clim_fut, "data/park/MORA/clim_fut_extra.rds")
+
+clim_fut <- readRDS("data/park/MORA/clim_fut_extra.rds") %>%
+  dplyr::mutate(x = round(x, 6),
+                y = round(y, 6))
+
+# MACA cell centers differ from GridMET's in the last decimals; snap each
+# future coordinate to the nearest historical one so cells line up.
+get_nearest <- function(fut_vec, hist_vec) {
+  u_fut  <- unique(fut_vec)
+  u_hist <- unique(hist_vec)
+  matched_hist <- u_hist[sapply(u_fut, function(v) which.min(abs(u_hist - v)))]
+  matched_hist[match(fut_vec, u_fut)]
+}
+
+clim_fut <- clim_fut %>%
+  dplyr::mutate(x = get_nearest(x, clim_hist$x),
+                y = get_nearest(y, clim_hist$y))
+
+mapview(aoi_gridmet_grid,
+        layer.name = "Gridmet Grid",
+        color = "red",
+        alpha.regions = 0,
+        lwd = 3) +
+  mapview(clim_pts,
+          layer.name = "Grid Points",
+          col.regions = "red") +
+  mapview(system_watershed,
+          col.regions = "dodgerblue",
+          layer.name = "Edith Watershed")
+
+```
+
+Paradise SNOTEL (#679) snow water equivalent and water-year cumulative
+precipitation, the observed record each cell is compared against.
+
+```{r inputs_snotel}
+
+snotel_daily <- readRDS("data/park/MORA/snotel_daily.rds")
+
+snotel_sites <- snotel_daily %>%
+  dplyr::distinct(site, name, latitude, longitude) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  st_transform(crs_use)
+
+snotel_paradise <- snotel_daily %>%
+  dplyr::filter(name == "Paradise",
+                sensor_id %in% c("WTEQ.I", "PREC.I")) %>%
+  dplyr::mutate(date = as_date(date),
+                value = as.numeric(value)) %>%
+  dplyr::distinct(date, sensor_id, .keep_all = TRUE) %>%
+  dplyr::select(date, water_year, sensor_id, value) %>%
+  tidyr::pivot_wider(names_from = sensor_id, values_from = value) %>%
+  dplyr::rename(swe_in = WTEQ.I,
+                precip_in = PREC.I) %>%   # PREC.I is already water-year cumulative
+  dplyr::mutate(water_year = as.numeric(water_year))
+
+rm(snotel_daily)
+
+```
+
+# 3. Run the WBM for every cell
+
+The WBM is run for each cell separately (`aggregate = FALSE`), using the same
+settings as the report run in `MORA_Deep_Dive_workflow.Rmd`. Future runs start
+from the final conditions of the historical run. Runs are cached; uncomment to
+rebuild.
+
+```{r wbm_run_all_grids}
+
+# hist_wbm <- run_NPS_WBM_points(points = clim_pts,
+#                                climate_data = clim_hist,
+#                                Direct_Frac = 0,
+#                                Return_Rate = 1,
+#                                PET_Method = "Oudin",
+#                                hock_coef = hock_coef,
+#                                Snowpack.Init = 0,
+#                                Soil.Init = 0,
+#                                Shade.Coeff = 1,
+#                                T.Base = 0,
+#                                Soil_mult = 1,
+#                                PET_mult = 1,
+#                                area_weighted = FALSE,
+#                                aoi = contributing_area,
+#                                grid = aoi_gridmet_grid,
+#                                ret_final_cond = TRUE,
+#                                use_final = FALSE,
+#                                aggregate = FALSE)
+# saveRDS(hist_wbm, "data/park/MORA/hist_wbm_extra.rds")
+#
+# fut_wbm <- run_NPS_WBM_points(points = clim_pts,
+#                               climate_data = clim_fut,
+#                               Direct_Frac = 0,
+#                               Return_Rate = 1,
+#                               PET_Method = "Oudin",
+#                               hock_coef = hock_coef,
+#                               Snowpack.Init = 0,
+#                               Soil.Init = 0,
+#                               Shade.Coeff = 1,
+#                               T.Base = 0,
+#                               Soil_mult = 1,
+#                               PET_mult = 1,
+#                               area_weighted = FALSE,
+#                               aoi = contributing_area,
+#                               grid = aoi_gridmet_grid,
+#                               ret_final_cond = FALSE,
+#                               use_final = TRUE,
+#                               param_list = hist_wbm[[2]],
+#                               aggregate = FALSE)
+# saveRDS(fut_wbm, "data/park/MORA/fut_wbm_extra.rds")
+
+hist_wbm <- readRDS("data/park/MORA/hist_wbm_extra.rds")
+fut_wbm <- readRDS("data/park/MORA/fut_wbm_extra.rds")
+
+# Cell attributes from the historical run (elevation, slope, aspect, soil
+# water capacity, area weight), used to explain differences between cells
+cell_attributes <- hist_wbm[[2]] %>%
+  dplyr::as_tibble() %>%
+  dplyr::select(x, y, area_weight, Elev, Slope, Aspect, SWC.Max)
+
+wbm_all <- hist_wbm[[1]] %>%
+  dplyr::bind_rows(fut_wbm) %>%
+  dplyr::left_join(all_cfs %>% dplyr::select(GCM, Skill), by = "GCM")
+
+rm(hist_wbm, fut_wbm)
+gc()
+
+cell_attributes
+
+```
+
+# 4. Compare cells
+
+Projected change (2035-2064 relative to 1980-2012) in runoff, temperature, and
+precipitation for each cell and GCM.
+
+```{r cell_differentials, fig.width=14, fig.height=10}
+
+wbm_xy_stats <- wbm_all %>%
+  dplyr::mutate(year = year(date),
+                stat_period = dplyr::case_when(
+                  year >= hist_yrs[1] & year <= hist_yrs[2] ~ "Baseline",
+                  year >= fut_yrs[1] & year <= fut_yrs[2] ~ "Future",
+                  TRUE ~ "Other")) %>%
+  dplyr::filter(stat_period != "Other") %>%
+  dplyr::group_by(GCM, stat_period, Skill, x, y) %>%
+  dplyr::summarize(mean_precip_in = mean(precip_in_wbm),
+                   mean_tmean_C = mean(tmean_C),
+                   mean_runoff_in = mean(runoff_in_wbm),
+                   .groups = "drop")
+
+baseline_xy <- wbm_xy_stats %>%
+  dplyr::filter(stat_period == "Baseline") %>%
+  dplyr::select(x, y,
+                mean_precip_in_baseline = mean_precip_in,
+                mean_tmean_C_baseline = mean_tmean_C,
+                mean_runoff_in_baseline = mean_runoff_in)
+
+future_differentials_xy <- wbm_xy_stats %>%
+  dplyr::filter(stat_period == "Future") %>%
+  dplyr::left_join(baseline_xy, by = c("x", "y")) %>%
+  dplyr::mutate(delta_precip_in = mean_precip_in - mean_precip_in_baseline,
+                delta_tmean_C = mean_tmean_C - mean_tmean_C_baseline,
+                delta_runoff_in = 365.25 * (mean_runoff_in - mean_runoff_in_baseline))
+
+# Watershed outline in lon/lat, simplified (the lidar-derived polygon is
+# vertex heavy)
+watershed <- system_watershed %>%
+  st_transform(4326) %>%
+  st_simplify(dTolerance = 10)
+
+plot_delta_grid <- function(var, fill_name, palette, title, file) {
+  delta_raster <- future_differentials_xy %>%
+    dplyr::mutate(x = round(x, 4), y = round(y, 4)) %>%
+    dplyr::select(x, y, GCM, dplyr::all_of(var)) %>%
+    st_as_stars(dims = c("x", "y", "GCM"), dx = 4000, dy = 4000)
+
+  p <- ggplot() +
+    geom_stars(data = delta_raster) +
+    geom_sf(data = watershed, fill = NA, color = "black", linewidth = 0.5) +
+    facet_wrap(~GCM, ncol = 8) +
+    scale_fill_distiller(palette = palette, name = fill_name,
+                         direction = 1, na.value = "transparent") +
+    theme_wsva() +
+    labs(title = title) +
+    theme(axis.text = element_blank(), axis.ticks = element_blank())
+
+  ggsave(file, p, dpi = 600)
+  p
+}
+
+plot_delta_grid("delta_runoff_in", "Delta Runoff (in)", "RdBu",
+                "30-Year Runoff Delta by GCM", "data/park/MORA/Figs/delta_runoff_grid.jpg")
+plot_delta_grid("delta_tmean_C", "Delta Temp (°C)", "OrRd",
+                "30-Year Temp Delta by GCM", "data/park/MORA/Figs/delta_tmean_grid.jpg")
+plot_delta_grid("delta_precip_in", "Delta Precip (in)", "BrBG",
+                "30-Year Precip Delta by GCM", "data/park/MORA/Figs/delta_precip_grid.jpg")
+
+```
+
+Each cell's historical snowpack and water-year cumulative precipitation for one
+water year, against Paradise SNOTEL. Cells kept by `select_climate_cells()` are
+drawn in blue; the others in gray.
+
+```{r cell_snow_precip_check}
+
+calibration_water_year <- 2020
+
+selected_cells <- clim_pts %>%
+  sf::st_drop_geometry() %>%
+  select_climate_cells() %>%
+  dplyr::mutate(selected = TRUE) %>%
+  dplyr::select(x, y, selected)
+
+cell_wy <- wbm_all %>%
+  dplyr::filter(GCM == "GridMET") %>%
+  dplyr::mutate(water_year = calc_water_year(date)) %>%
+  dplyr::filter(water_year == calibration_water_year) %>%
+  dplyr::arrange(x, y, date) %>%
+  dplyr::group_by(x, y) %>%
+  dplyr::mutate(cum_precip_in_wbm = cumsum(precip_in_wbm)) %>%
+  dplyr::ungroup() %>%
+  dplyr::left_join(selected_cells, by = c("x", "y")) %>%
+  dplyr::mutate(cell = ifelse(is.na(selected), "Other cell", "Selected cell"),
+                coord = paste0(round(x, 3), ", ", round(y, 3)))
+
+snotel_wy <- snotel_paradise %>%
+  dplyr::filter(water_year == calibration_water_year)
+
+cell_colors <- c("Selected cell" = "#1b6ca8", "Other cell" = "gray60", "SNOTEL" = "#b02a24")
+
+swe_fig <- ggplot(cell_wy, aes(x = date)) +
+  geom_line(aes(y = snowpack_in_wbm, group = coord, color = cell), linewidth = 0.8) +
+  geom_line(data = snotel_wy, aes(y = swe_in, color = "SNOTEL"), linewidth = 1) +
+  scale_color_manual("", values = cell_colors) +
+  labs(x = "", y = "Snowpack (in)",
+       title = paste0("Water Year ", calibration_water_year, " | Hock Coef: ", hock_coef)) +
+  theme_wsva()
+
+precip_fig <- ggplot(cell_wy, aes(x = date)) +
+  geom_line(aes(y = cum_precip_in_wbm, group = coord, color = cell), linewidth = 0.8) +
+  geom_line(data = snotel_wy, aes(y = precip_in, color = "SNOTEL"), linewidth = 1) +
+  scale_color_manual("", values = cell_colors) +
+  labs(x = "", y = "Cumulative Precip (in)",
+       title = paste0("Water Year ", calibration_water_year, " - Cumulative Precip")) +
+  theme_wsva()
+
+ggarrange(swe_fig, precip_fig, ncol = 2, common.legend = TRUE, legend = "bottom")
+
+ggsave(paste0("data/park/MORA/Figs/CellCheck_Hock_", hock_coef, "_WY", calibration_water_year, ".jpg"),
+       width = 10, height = 4, dpi = 600)
+
+# Snow fit for each cell over the full SNOTEL overlap
+cell_snow_fit <- wbm_all %>%
+  dplyr::filter(GCM == "GridMET") %>%
+  dplyr::inner_join(snotel_paradise, by = "date") %>%
+  tidyr::drop_na(swe_in, snowpack_in_wbm) %>%
+  dplyr::group_by(x, y) %>%
+  dplyr::summarize(rmse_in = Metrics::rmse(swe_in, snowpack_in_wbm),
+                   nse = 1 - sum((swe_in - snowpack_in_wbm)^2) / sum((swe_in - mean(swe_in))^2),
+                   .groups = "drop") %>%
+  dplyr::left_join(cell_attributes, by = c("x", "y")) %>%
+  dplyr::left_join(selected_cells, by = c("x", "y"))
+
+cell_snow_fit
+
+```
+
+# 5. Selected cells
+
+I evaluated the climate grid cells to the west, east, and south of the watershed
+(6 total). The 3 southern grids were removed immediately after evaluating
+elevation and land cover, leaving the grid the watershed is within and one to
+the west and east. Further evaluation showed that the eastern cell, while
+tracking cumulative precipitation similarly to the other two cells and the
+Paradise SNOTEL station, consistently produced much lower cumulative SWE. This
+cell sits at a lower elevation than the other two, so despite comparable
+precipitation totals, a greater amount of precipitation falls as rain rather
+than snow, driving the divergence in cumulative SWE. Based on this, I retained
+only two grid cells for the analysis: the cell containing the watershed and the
+cell to the west.
+
+```{r selected_cells}
+
+select_clim_pts <- clim_pts %>%
+  select_climate_cells()
+
+select_clim_pts
+
+```
+
+Climate grid figure: all six cells, the two selected, and nearby SNOTEL
+stations.
+
+```{r climate_figure}
+
+climate_fig_extent <- aoi_gridmet_grid %>% sf::st_union() %>% sf::st_buffer(6000)
+nps_tiles_climate <- get_nps_basemap(aoi = climate_fig_extent, style = "standard", buffer_km = 1, zoom = 13)
+
+climate_fig_bbox <- climate_fig_extent %>%
+  sf::st_transform(3857) %>%
+  sf::st_bbox()
+
+climate_figure <- ggplot() +
+  geom_nps_basemap(nps_tiles_climate) +
+  geom_sf(data = sf::st_transform(contributing_area, 3857), aes(fill = "Contributing Area"),
+          color = "black", linewidth = 0.25, alpha = 0.2) +
+  geom_sf(data = sf::st_transform(aoi_gridmet_grid, 3857), aes(color = "Climate Grid"),
+          fill = NA, linewidth = 1) +
+  geom_sf(data = sf::st_transform(select_clim_pts, 3857), aes(shape = "Selected Climate Grid"),
+          color = "yellow", size = 5, fill = "yellow") +
+  geom_sf(data = sf::st_transform(snotel_sites, 3857), aes(shape = "SNOTEL/Weather Station"),
+          fill = "royalblue", color = "black", size = 3) +
+  ggrepel::geom_label_repel(data = sf::st_transform(snotel_sites, 3857),
+                            aes(label = name, geometry = geometry),
+                            stat = "sf_coordinates", size = 2.5, label.size = 0,
+                            fill = scales::alpha("white", 0.7)) +
+  scale_fill_manual(name = "", values = c("Contributing Area" = "dodgerblue")) +
+  scale_color_manual(name = "", values = c("Climate Grid" = "red")) +
+  scale_shape_manual(name = "", values = c("SNOTEL/Weather Station" = 21,
+                                           "Selected Climate Grid" = 22)) +
+  ggspatial::annotation_scale(location = "bl", width_hint = 0.3) +
+  ggspatial::annotation_north_arrow(location = "tr", which_north = "true",
+                                    style = ggspatial::north_arrow_fancy_orienteering()) +
+  coord_sf(xlim = c(climate_fig_bbox["xmin"], climate_fig_bbox["xmax"]),
+           ylim = c(climate_fig_bbox["ymin"], climate_fig_bbox["ymax"]),
+           crs = 3857, expand = FALSE) +
+  theme_void() +
+  theme(legend.position = "right")
+
+climate_figure
+
+ggsave("data/park/MORA/Figs/climate_grid_fig.jpg", climate_figure, width = 5, height = 5, dpi = 600)
+
+```
